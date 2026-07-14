@@ -1,0 +1,67 @@
+---
+title: OfflineNotes
+description: คอร์สแบบลงมือทำสองภาษา ที่คุณจะสร้าง OfflineNotes แอปโน้ต markdown แบบ local-first — ทำงาน offline ได้เต็มรูปแบบผ่าน IndexedDB กับ Service Worker พร้อม CRDT engine ที่เขียนด้วย Rust→WASM ซึ่ง merge การแก้ไขพร้อมกันได้แบบ conflict-free และ sync server บาง ๆ ที่ sync ข้ามอุปกรณ์ตอนคุณกลับมา online
+template: splash
+hero:
+  tagline: สร้าง OfflineNotes แอปโน้ตแบบ local-first ที่ทำงาน offline ได้เต็มรูปแบบ โน้ตอยู่ใน IndexedDB, CRDT engine แบบ Rust→WASM merge การแก้ไขพร้อมกันแบบ conflict-free, Service Worker ทำให้มันเป็น PWA ที่ติดตั้งได้ และ sync server บาง ๆ คอยให้ทุกอุปกรณ์ตรงกันตอนคุณกลับมา online
+  actions:
+    - text: เริ่มที่นี่
+      link: /offlinenotes/th/introduction/
+      icon: right-arrow
+      variant: primary
+    - text: ดู architecture
+      link: /offlinenotes/th/introduction/architecture/
+      icon: rocket
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you'll build
+
+<CardGrid>
+  <Card title="Introduction" icon="open-book">
+    ทำไมต้อง OfflineNotes, คอร์สนี้จัดโครงสร้างอย่างไร และคุณจะสร้างอะไรได้บ้างเมื่อจบ [Open →](/offlinenotes/th/introduction/)
+  </Card>
+  <Card title="Setup & Tooling" icon="setting">
+    Astro, TypeScript และ toolchain แบบ Rust→WASM (wasm-pack) ใน pnpm workspace [Open →](/offlinenotes/th/setup/)
+  </Card>
+  <Card title="App Shell" icon="laptop">
+    สร้าง Astro app shell และ Web Components ชุดแรกสำหรับ UI ของโน้ต [Open →](/offlinenotes/th/app-shell/)
+  </Card>
+  <Card title="IndexedDB Foundation" icon="seti:db">
+    ห่อ IndexedDB ไว้ใน store ที่มี type สำหรับโน้ตและ local op log ของมัน [Open →](/offlinenotes/th/indexeddb/)
+  </Card>
+  <Card title="The Notes UI" icon="pencil">
+    สร้าง แก้ไข และลบโน้ต markdown ในรูปของ Web Components ที่หนุนหลังด้วย IndexedDB [Open →](/offlinenotes/th/notes-ui/)
+  </Card>
+  <Card title="Rust → WASM Toolchain" icon="seti:rust">
+    compile Rust เป็น WASM ด้วย wasm-bindgen แล้วเรียกมันจาก TypeScript [Open →](/offlinenotes/th/wasm-toolchain/)
+  </Card>
+  <Card title="A CRDT in Rust" icon="puzzle">
+    สร้าง CRDT: LWW register สำหรับ field และ sequence CRDT สำหรับ body [Open →](/offlinenotes/th/crdt-rust/)
+  </Card>
+  <Card title="Wiring the WASM Core" icon="random">
+    ป้อน edit ในเครื่องผ่าน WASM CRDT แล้ว persist op ของมันลง IndexedDB [Open →](/offlinenotes/th/wiring-wasm/)
+  </Card>
+  <Card title="Service Worker (Offline)" icon="cloud-download">
+    precache app shell ให้ OfflineNotes ทำงาน offline ได้เต็มรูปแบบและติดตั้งเป็น PWA [Open →](/offlinenotes/th/service-worker/)
+  </Card>
+  <Card title="The Sync Server" icon="server">
+    สร้าง Hono server บาง ๆ ที่เก็บและส่งต่อ CRDT op ของแต่ละโน้ต [Open →](/offlinenotes/th/sync-server/)
+  </Card>
+  <Card title="Push & Pull Sync" icon="right-arrow">
+    push op ในเครื่อง, pull op จากที่อื่น แล้ว merge ด้วย WASM engine [Open →](/offlinenotes/th/push-pull/)
+  </Card>
+  <Card title="Background Sync" icon="rocket">
+    เลื่อน sync ออกไปตอน offline แล้ว retry อัตโนมัติเมื่อกลับมามีเน็ต [Open →](/offlinenotes/th/background-sync/)
+  </Card>
+  <Card title="Conflict-free Merge" icon="approve-check">
+    ดู client สองตัวแก้โน้ตเดียวกันตอน offline แล้ว merge โดยไม่มี conflict เลย [Open →](/offlinenotes/th/merge-practice/)
+  </Card>
+  <Card title="Deployment" icon="cloud-download">
+    ปล่อย PWA กับ sync server ขึ้น production และผ่านการตรวจ installability [Open →](/offlinenotes/th/deployment/)
+  </Card>
+  <Card title="Wrap-up" icon="star">
+    ทบทวนสิ่งที่คุณสร้าง, trade-off ต่าง ๆ และจะพา OfflineNotes ไปต่อทางไหน [Open →](/offlinenotes/th/wrap-up/)
+  </Card>
+</CardGrid>

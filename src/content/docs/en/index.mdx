@@ -1,0 +1,67 @@
+---
+title: OfflineNotes
+description: A hands-on, bilingual course where you build OfflineNotes, a local-first markdown notes app — fully offline via IndexedDB and a Service Worker, with a Rust→WASM CRDT engine that merges concurrent edits conflict-free and a thin sync server that syncs across devices when you're back online.
+template: splash
+hero:
+  tagline: Build OfflineNotes, a local-first notes app that works fully offline. Notes live in IndexedDB, a Rust→WASM CRDT engine merges concurrent edits conflict-free, a Service Worker makes it an installable PWA, and a thin sync server keeps every device in step when you're back online.
+  actions:
+    - text: Start here
+      link: /offlinenotes/en/introduction/
+      icon: right-arrow
+      variant: primary
+    - text: See the architecture
+      link: /offlinenotes/en/introduction/architecture/
+      icon: rocket
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you'll build
+
+<CardGrid>
+  <Card title="Introduction" icon="open-book">
+    Why OfflineNotes, how the course is structured, and what you'll have built by the end. [Open →](/offlinenotes/en/introduction/)
+  </Card>
+  <Card title="Setup & Tooling" icon="setting">
+    Astro, TypeScript, and the Rust→WASM toolchain (wasm-pack), in a pnpm workspace. [Open →](/offlinenotes/en/setup/)
+  </Card>
+  <Card title="App Shell" icon="laptop">
+    Build the Astro app shell and the first Web Components for the notes UI. [Open →](/offlinenotes/en/app-shell/)
+  </Card>
+  <Card title="IndexedDB Foundation" icon="seti:db">
+    Wrap IndexedDB in a typed store for notes and their local op log. [Open →](/offlinenotes/en/indexeddb/)
+  </Card>
+  <Card title="The Notes UI" icon="pencil">
+    Create, edit, and delete markdown notes as Web Components, backed by IndexedDB. [Open →](/offlinenotes/en/notes-ui/)
+  </Card>
+  <Card title="Rust → WASM Toolchain" icon="seti:rust">
+    Compile Rust to WASM with wasm-bindgen and call it from TypeScript. [Open →](/offlinenotes/en/wasm-toolchain/)
+  </Card>
+  <Card title="A CRDT in Rust" icon="puzzle">
+    Build the CRDT: an LWW register for fields and a sequence CRDT for the body. [Open →](/offlinenotes/en/crdt-rust/)
+  </Card>
+  <Card title="Wiring the WASM Core" icon="random">
+    Feed local edits through the WASM CRDT and persist its ops to IndexedDB. [Open →](/offlinenotes/en/wiring-wasm/)
+  </Card>
+  <Card title="Service Worker (Offline)" icon="cloud-download">
+    Precache the app shell so OfflineNotes works fully offline and installs as a PWA. [Open →](/offlinenotes/en/service-worker/)
+  </Card>
+  <Card title="The Sync Server" icon="server">
+    Build a thin Hono server that stores and relays each note's CRDT ops. [Open →](/offlinenotes/en/sync-server/)
+  </Card>
+  <Card title="Push & Pull Sync" icon="right-arrow">
+    Push local ops, pull remote ones, and merge them with the WASM engine. [Open →](/offlinenotes/en/push-pull/)
+  </Card>
+  <Card title="Background Sync" icon="rocket">
+    Defer sync while offline and retry automatically when connectivity returns. [Open →](/offlinenotes/en/background-sync/)
+  </Card>
+  <Card title="Conflict-free Merge" icon="approve-check">
+    Watch two clients edit the same note offline and merge with zero conflicts. [Open →](/offlinenotes/en/merge-practice/)
+  </Card>
+  <Card title="Deployment" icon="cloud-download">
+    Ship the PWA and the sync server, and pass the installability checks. [Open →](/offlinenotes/en/deployment/)
+  </Card>
+  <Card title="Wrap-up" icon="star">
+    Review what you built, the trade-offs, and where to take OfflineNotes next. [Open →](/offlinenotes/en/wrap-up/)
+  </Card>
+</CardGrid>

@@ -1,0 +1,61 @@
+---
+title: Real-World Projects Roadmap
+description: "OfflineNotes is the offline-first entry in a series that adapts the whole Learn Hub catalog into real applications. Here's where it fits and what's around it."
+sidebar:
+  order: 4
+---
+
+## Where OfflineNotes fits
+
+OfflineNotes is part of the **Real-World Projects** series. Each project takes a different real application and rebuilds it from an empty repo, deliberately drawing on a different slice of the Learn Hub courses — so that, taken together, they cover almost the entire catalog. OfflineNotes is the **local-first / offline** entry: where the others assume a connection, this one treats the network as optional and makes the *client* the source of truth.
+
+## TaskFlow — realtime Kanban board ✅ live
+
+A Trello-style board where every change shows up live for everyone. A Rust backend, Redis for cache and fan-out, and an Astro frontend.
+
+- **Stack:** Rust/Axum + PostgreSQL + Redis + WebSocket + Astro + Docker
+
+## DevBlog — headless CMS + blog ✅ live
+
+A content platform over a **GraphQL** API with SSR and ISR.
+
+- **Stack:** Node/NestJS + MongoDB + GraphQL + Next.js
+
+## ShopMicro — e-commerce microservices ✅ live
+
+An online store split into independent services over **gRPC**, with Kafka, RabbitMQ, a saga, and Kubernetes.
+
+- **Stack:** Go + gRPC + PostgreSQL + Kafka + RabbitMQ + Kubernetes
+
+## FitTrack — mobile-first fitness app ✅ live
+
+A workout tracker with a Flutter app and a Svelte companion on one Python backend.
+
+- **Stack:** Python/FastAPI + Supabase + Flutter + Svelte
+
+## Mosaic — micro-frontend storefront ✅ live
+
+A storefront of independently-deployed micro-frontends, composed at runtime with Module Federation.
+
+- **Stack:** React + Svelte + Astro + Web Components + Module Federation
+
+## OfflineNotes — offline-first PWA ← you are here
+
+A local-first notes app that works fully offline and syncs conflict-free when back online — IndexedDB for storage, a Rust→WASM CRDT for merge, Web Components on an Astro shell, and a Service Worker PWA.
+
+- **Stack:** TypeScript + Web Components + IndexedDB + WASM (Rust) + Astro
+- **Adapts:** Browser Storage, Web Components, TypeScript, Rust (WASM), Astro
+
+## CloudDeploy — infrastructure capstone
+
+Take the projects and deploy them for real: infrastructure as code across clouds, Kubernetes, observability, identity, and feature flags.
+
+- **Stack:** Terraform/Terragrunt (AWS/GCP/Azure) + Kubernetes + Datadog + Keycloak + GrowthBook
+
+## The thread through the series
+
+Every other project assumes the server is there. OfflineNotes flips that: the browser owns the data, the network is a background convenience, and correctness under concurrent, disconnected editing is solved with a CRDT rather than a central lock. It's the series' argument that "the frontend" can be a complete, correct application in its own right.
+
+## Verify
+
+You're oriented when you can say, in a sentence each, what OfflineNotes builds, which slice of the catalog it adapts, and what "local-first" changes about where the truth lives. Next, start [Module 1 · Setup & Tooling](/offlinenotes/en/setup/).

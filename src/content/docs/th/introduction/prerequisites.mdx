@@ -1,0 +1,38 @@
+---
+title: Prerequisites
+description: "เครื่องมือที่ต้องติดตั้งก่อน Module 1 และความรู้ที่คอร์สนี้ถือว่าคุณมีอยู่แล้ว"
+sidebar:
+  order: 3
+---
+
+## What you'll install
+
+เครื่องมือแต่ละตัวจะถูกแนะนำใน module ที่ใช้มันเป็นครั้งแรก แต่ตรงนี้คือรายการเต็มเพื่อให้คุณ set up ล่วงหน้าได้
+
+- **Node.js 20+** และ **[pnpm](https://pnpm.io/) 9+** — แอปเป็น monorepo แบบ pnpm-workspaces (web app กับ sync server อยู่ด้วยกัน)
+- **[Rust](https://www.rust-lang.org/tools/install)** (ผ่าน `rustup`) และ **[wasm-pack](https://rustwasm.github.io/wasm-pack/)** — CRDT engine เขียนด้วย Rust แล้ว compile เป็น WebAssembly ส่วน `rustup target add wasm32-unknown-unknown` จะเพิ่มตอน Module 5 ต้องใช้
+- **browser ที่ใช้ Chromium** พร้อม DevTools — คุณจะคลุกอยู่กับ panel **Application** (IndexedDB, Service Workers, Cache, Manifest) และสลับ throttle **Offline** อยู่ตลอด
+- **git** — คุณจะ deploy PWA และ sync server แยกกันในภายหลัง
+
+ไม่ต้องมี framework CLI แบบ global เลย — แอปถูก scaffold ด้วย Astro ภายใน monorepo
+
+## What the course assumes
+
+OfflineNotes เป็นโปรเจกต์ระดับ intermediate-to-advanced คุณจะได้ประโยชน์จากมันมากที่สุดถ้าคุณคุ้นกับ:
+
+- **TypeScript** — type, module, `async`/`await` และ Promise ฝั่ง client เป็น TypeScript ล้วน
+- **แพลตฟอร์ม browser** — DOM, custom event และการได้ลอง **Web Components** (custom element) กับ **IndexedDB** เป็นครั้งแรก ทั้งคู่สอนตั้งแต่พื้นฐาน แต่การเคยเจอมาก่อนช่วยได้
+- **Rust นิดหน่อย** — คุณไม่ต้องคล่อง; Module 5–6 สอน Rust เท่าที่ต้องใช้กับ CRDT และอาศัยการเทียบเคียงตรงที่ช่วยได้ ความคุ้นกับพื้นฐาน ownership/borrowing ทำให้ราบรื่นขึ้น
+- **พื้นฐาน HTTP** — sync server เล็กมาก แต่คุณควรคุ้นกับ request และ JSON
+
+คุณ **ไม่** จำเป็นต้องมีประสบการณ์ CRDT, WASM หรือ PWA มาก่อน — พวกนั้นคือจุดประสงค์ของคอร์สนี้
+
+## Verify
+
+คุณ set up เสร็จเมื่อ:
+
+- `node --version` แสดง 20+, `pnpm --version` แสดง 9+
+- `rustc --version` และ `wasm-pack --version` ทำงานได้ทั้งคู่
+- คุณเปิด panel **Application** ใน DevTools ของ browser แล้วเจอส่วน IndexedDB และ Service Workers
+
+ต่อไป [roadmap](/offlinenotes/th/introduction/roadmap/) จะแสดงว่า OfflineNotes อยู่ตรงไหนในซีรีส์ที่ใหญ่กว่า

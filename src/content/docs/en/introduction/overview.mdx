@@ -1,0 +1,53 @@
+---
+title: Overview
+description: "What OfflineNotes is, the feature list, and the map from each build module to the Learn Hub course it adapts."
+sidebar:
+  order: 1
+---
+
+## What OfflineNotes is
+
+OfflineNotes is a **notes app that treats the network as optional**. You write markdown notes, they save instantly to **IndexedDB** on your device, and everything keeps working with the Wi-Fi off — searching, editing, creating. When a connection comes back, your notes **sync across your devices**, and edits you made on two devices while both were offline **merge without conflicts**.
+
+That last part is the hard part, and it's the reason the project exists. Most apps are **server-first**: the server holds the truth, the client is a window onto it, and "offline" is an error state. OfflineNotes is **local-first**: the *client* holds the truth, the network is a background convenience, and being offline is the *normal* case, not a failure. Making that work — especially merging concurrent edits from multiple devices without a central referee — is what a **CRDT** (Conflict-free Replicated Data Type) is for, and it's why the merge engine is written in **Rust and compiled to WASM**: it's shared, correct, portable logic that runs the same in every client.
+
+The point of the project isn't the notes — it's **local-first**: IndexedDB as the source of truth, a WASM CRDT for conflict-free merge, a Service Worker for true offline, and a thin sync server that relays changes without owning them.
+
+## The feature set
+
+- **Offline-first** — create, edit, delete, and browse markdown notes with no network at all.
+- **IndexedDB storage** — every note and its local change-log persist on the device.
+- **Rust→WASM CRDT** — an LWW register for note fields and a sequence CRDT for the body merge concurrent edits conflict-free.
+- **Installable PWA** — a Service Worker precaches the app shell; OfflineNotes installs and launches like a native app.
+- **Cross-device sync** — a thin server relays each note's CRDT ops; devices push and pull.
+- **Background Sync** — edits made offline sync automatically the moment you're back online.
+
+## The course map
+
+Each build module adapts a Learn Hub course to one slice of OfflineNotes.
+
+| Module | What you build | Learn Hub course it adapts |
+| --- | --- | --- |
+| 1 · Setup & Tooling | Astro + TS + the Rust→WASM toolchain | TypeScript / Rust |
+| 2 · App Shell | The Astro shell and first Web Components | Web Components / Astro |
+| 3 · IndexedDB Foundation | A typed IndexedDB store | Browser Storage |
+| 4 · The Notes UI | Notes as Web Components | Web Components |
+| 5 · Rust→WASM Toolchain | Rust compiled to WASM, called from TS | Rust / WASM |
+| 6 · A CRDT in Rust | The conflict-free merge engine | Rust |
+| 7 · Wiring the WASM Core | Edits → CRDT ops → IndexedDB | Rust / Browser Storage |
+| 8 · Service Worker | True offline + installable PWA | Browser Storage / PWA |
+| 9 · The Sync Server | A thin Hono relay for CRDT ops | Node |
+| 10 · Push & Pull Sync | Client sync + WASM merge | Browser Storage |
+| 11 · Background Sync | Deferred, auto-retrying sync | PWA |
+| 12 · Conflict-free Merge | Concurrent offline edits merging | Rust / CRDTs |
+| 13 · Deployment | Ship the PWA and sync server | Docker / CI |
+
+## Verify
+
+You're ready to move on when you can answer these in your own words:
+
+- What does "local-first" mean, and how is it different from a normal server-first app that has an offline mode bolted on?
+- Why does merging concurrent offline edits need a CRDT rather than last-write-wins, and why is the CRDT written in Rust/WASM?
+- Which three features make up OfflineNotes' core, and which ideas were deliberately left out?
+
+Next, the [architecture](/offlinenotes/en/introduction/architecture/) shows how the pieces fit together.

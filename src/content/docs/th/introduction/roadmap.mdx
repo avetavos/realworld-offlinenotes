@@ -1,0 +1,61 @@
+---
+title: Real-World Projects Roadmap
+description: "OfflineNotes คือตัวแทนสาย offline-first ในซีรีส์ที่ดัดแปลง Learn Hub ทั้งแคตตาล็อกให้กลายเป็นแอปจริง นี่คือที่ที่มันอยู่และสิ่งที่อยู่รอบ ๆ มัน"
+sidebar:
+  order: 4
+---
+
+## Where OfflineNotes fits
+
+OfflineNotes เป็นส่วนหนึ่งของซีรีส์ **Real-World Projects** แต่ละโปรเจกต์หยิบแอปจริงคนละตัวมาสร้างใหม่จาก repo เปล่า โดยตั้งใจดึงคอร์สจาก Learn Hub คนละส่วนมาใช้ — เพื่อว่าเมื่อรวมกันแล้วจะครอบคลุมแคตตาล็อกเกือบทั้งหมด OfflineNotes คือตัวแทนสาย **local-first / offline**: ในขณะที่ตัวอื่นถือว่าต้องมีการเชื่อมต่อ ตัวนี้มองเครือข่ายเป็นของเสริม และทำให้ *client* เป็น source of truth
+
+## TaskFlow — realtime Kanban board ✅ live
+
+board สไตล์ Trello ที่ทุกการเปลี่ยนแปลงโผล่แบบ live ให้ทุกคนเห็น มี Rust backend, Redis สำหรับ cache และ fan-out และ Astro frontend
+
+- **Stack:** Rust/Axum + PostgreSQL + Redis + WebSocket + Astro + Docker
+
+## DevBlog — headless CMS + blog ✅ live
+
+แพลตฟอร์มคอนเทนต์บน **GraphQL** API พร้อม SSR และ ISR
+
+- **Stack:** Node/NestJS + MongoDB + GraphQL + Next.js
+
+## ShopMicro — e-commerce microservices ✅ live
+
+ร้านค้าออนไลน์ที่แยกเป็น service อิสระคุยกันผ่าน **gRPC** พร้อม Kafka, RabbitMQ, saga และ Kubernetes
+
+- **Stack:** Go + gRPC + PostgreSQL + Kafka + RabbitMQ + Kubernetes
+
+## FitTrack — mobile-first fitness app ✅ live
+
+ตัวติดตามการออกกำลังกายที่มีแอป Flutter และตัวคู่หูบน Svelte บน Python backend เดียว
+
+- **Stack:** Python/FastAPI + Supabase + Flutter + Svelte
+
+## Mosaic — micro-frontend storefront ✅ live
+
+storefront ที่ประกอบจาก micro-frontend ซึ่ง deploy อิสระ แล้ว compose ตอน runtime ด้วย Module Federation
+
+- **Stack:** React + Svelte + Astro + Web Components + Module Federation
+
+## OfflineNotes — offline-first PWA ← you are here
+
+แอปโน้ตแบบ local-first ที่ทำงาน offline ได้เต็มรูปแบบและ sync แบบ conflict-free ตอนกลับมา online — IndexedDB สำหรับ storage, CRDT แบบ Rust→WASM สำหรับ merge, Web Components บน Astro shell และ Service Worker PWA
+
+- **Stack:** TypeScript + Web Components + IndexedDB + WASM (Rust) + Astro
+- **Adapts:** Browser Storage, Web Components, TypeScript, Rust (WASM), Astro
+
+## CloudDeploy — infrastructure capstone
+
+หยิบโปรเจกต์ทั้งหมดมา deploy ของจริง: infrastructure as code ข้ามหลาย cloud, Kubernetes, observability, identity และ feature flag
+
+- **Stack:** Terraform/Terragrunt (AWS/GCP/Azure) + Kubernetes + Datadog + Keycloak + GrowthBook
+
+## The thread through the series
+
+ทุกโปรเจกต์อื่นถือว่า server อยู่ตรงนั้น OfflineNotes พลิกเรื่องนี้: browser เป็นเจ้าของข้อมูล, เครือข่ายเป็นความสะดวกเบื้องหลัง และความถูกต้องภายใต้การแก้ไขพร้อมกันแบบขาดการเชื่อมต่อถูกแก้ด้วย CRDT แทน lock กลาง นี่คือข้อโต้แย้งของซีรีส์ที่ว่า "frontend" เป็นแอปพลิเคชันที่สมบูรณ์และถูกต้องในตัวเองได้
+
+## Verify
+
+คุณเข้าใจภาพรวมแล้วเมื่อพูดได้ในประโยคเดียวต่ออันว่า OfflineNotes สร้างอะไร, มันดัดแปลงแคตตาล็อกส่วนไหน และ "local-first" เปลี่ยนอะไรเกี่ยวกับที่ที่ความจริงอยู่ ต่อไป เริ่ม [Module 1 · Setup & Tooling](/offlinenotes/th/setup/)

@@ -1,0 +1,38 @@
+---
+title: Prerequisites
+description: "The tools to install before Module 1, and the knowledge the course assumes."
+sidebar:
+  order: 3
+---
+
+## What you'll install
+
+Each tool is introduced in the module that first uses it, but here's the full list so you can set up ahead of time.
+
+- **Node.js 20+** and **[pnpm](https://pnpm.io/) 9+** — the app is a pnpm-workspaces monorepo (the web app and the sync server live together).
+- **[Rust](https://www.rust-lang.org/tools/install)** (via `rustup`) and **[wasm-pack](https://rustwasm.github.io/wasm-pack/)** — the CRDT engine is written in Rust and compiled to WebAssembly. `rustup target add wasm32-unknown-unknown` is added when Module 5 needs it.
+- **A Chromium-based browser** with DevTools — you'll live in the **Application** panel (IndexedDB, Service Workers, Cache, Manifest) and toggle the **Offline** throttle constantly.
+- **git** — you'll deploy the PWA and the sync server independently later.
+
+No global framework CLI is required — the app is scaffolded with Astro inside the monorepo.
+
+## What the course assumes
+
+OfflineNotes is an intermediate-to-advanced project. You'll get the most out of it if you're comfortable with:
+
+- **TypeScript** — types, modules, `async`/`await`, and Promises. The client is all TypeScript.
+- **The browser platform** — the DOM, custom events, and a first taste of **Web Components** (custom elements) and **IndexedDB**. Both are taught from the ground up, but prior exposure helps.
+- **A little Rust** — you don't need to be fluent; Modules 5–6 teach the Rust you need for the CRDT, and lean on comparisons where they help. Comfort with ownership/borrowing basics smooths the ride.
+- **HTTP basics** — the sync server is tiny, but you should be comfortable with requests and JSON.
+
+You do **not** need prior CRDT, WASM, or PWA experience — those are the point of the course.
+
+## Verify
+
+You're set up when:
+
+- `node --version` shows 20+, `pnpm --version` shows 9+.
+- `rustc --version` and `wasm-pack --version` both work.
+- You can open your browser's DevTools **Application** panel and find the IndexedDB and Service Workers sections.
+
+Next, the [roadmap](/offlinenotes/en/introduction/roadmap/) shows where OfflineNotes fits in the wider series.
