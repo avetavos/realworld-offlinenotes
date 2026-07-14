@@ -1,0 +1,181 @@
+---
+title: wasm-bindgen basics
+description: "export ฟังก์ชันและ struct จาก Rust ด้วย #[wasm_bindgen], build ด้วย wasm-pack --target web แล้วเรียกจาก TypeScript"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+ใน [The Notes UI](/offlinenotes/th/notes-ui/) เราเก็บ note เป็น field ธรรมดา — พอใช้ได้จนกว่าสองเครื่องจะแก้ note เดียวกันตอน offline ทางแก้คือ CRDT และเราจะเขียนมันครั้งเดียวใน Rust แล้วรันในทุก browser เป็น WebAssembly ก่อนถึงตัว CRDT เอง เราต้องมี toolchain: Rust crate ที่ compile เป็น WASM และไฟล์ TypeScript ที่เรียกเข้าไปในมันได้
+
+บทนี้ export สองอย่างจาก crate `crdt` — free function หนึ่งตัวและ struct ที่มี constructor — build ด้วย `wasm-pack build --target web` แล้วเรียกทั้งคู่จาก web app ยังไม่มีอะไรเจาะจง CRDT; จุดหมายคือทำให้ path Rust→WASM→TypeScript ทำงานครบวงจร บทถัดไปจะได้โฟกัสที่ merge logic แทนที่จะเป็นงานเดินท่อ
+
+## Why
+
+merge logic ต้อง **เหมือนกันเป๊ะ** บนทุก client ถ้าแต่ละเครื่อง reimplement CRDT ใน TypeScript ความต่างเล็ก ๆ จะทำลาย convergence — การรับประกันทั้งหมด การเขียนมันครั้งเดียวใน Rust แล้ว compile เป็น WASM ให้ core ที่ portable, เร็ว และ test ดีตัวเดียว
+
+`wasm-bindgen` คือสิ่งที่ทำให้ core นั้น *เรียกได้* Rust กับ JavaScript ไม่แชร์ type system หรือ heap กัน; wasm-bindgen สร้าง glue ที่ให้ method ของ JS class เอื้อมไปถึง method ของ Rust struct โดย marshal argument และ return value ระหว่างทาง `wasm-pack` ขับ build ทั้งหมด — มันรัน Rust compiler ด้วย target ที่ถูกต้อง, รัน `wasm-bindgen` ทับ output แล้วปล่อย directory `pkg/` ที่มี binary `.wasm` พร้อม JS loader และ TypeScript type definition
+
+เราใช้ `--target web` โดยเฉพาะ: มันปล่อย ES module ตัวจริงที่คุณ `import` ด้วยฟังก์ชัน `init()` ไม่ต้องมี bundler plugin ไม่ต้องมี Node shim ตรงกับแอป Astro/Vite ที่พูดภาษา ES module อยู่แล้ว
+
+## Pros & cons
+
+**`wasm-pack build --target web` vs `--target bundler`**
+- **Pros:** ปล่อย ES module ธรรมดาพร้อม `init()` ชัดเจน; คุณ `import` มันจากแอป Vite/Astro หรือแม้แต่ `<script type="module">` ดิบ ๆ ได้โดยไม่ต้อง config bundler เพิ่ม การ initialize ชัดเจน ดังนั้น *เมื่อไหร่* ที่ WASM โหลดอยู่ในการควบคุมของคุณ
+- **Cons:** คุณต้องจำไว้ว่าต้อง `await init()` ก่อน call แรก และคุณ fetch ไฟล์ `.wasm` เองตอน runtime `--target bundler` ซ่อน `init()` ไว้หลัง WASM support ของ bundler ซึ่งลื่นกว่า — แต่เฉพาะภายใน bundler ที่รองรับมัน และควบคุมจังหวะโหลดได้น้อยกว่า
+
+**Rust→WASM engine vs a hand-written TypeScript CRDT**
+- **Pros:** implementation เดียว, test ชุดเดียว, พฤติกรรมเหมือนกันทุกที่; enum และ exhaustive `match` ของ Rust ทำให้โค้ดจัดการ op ผิดแบบแนบเนียนได้ยาก
+- **Cons:** toolchain ตัวที่สอง (Rust + wasm-pack) ใน repo, build step ก่อน web app รันได้ และ data-marshalling boundary ที่ต้องคิดถึง (บทถัดไป) สำหรับแอป *ง่าย ๆ* นี่เกินจำเป็น — เรารับมันไว้เพราะ CRDT คือส่วนที่ยากและ critical ต่อความถูกต้อง
+
+## Set it up
+
+### 1. `crates/crdt/Cargo.toml`
+
+crate compile เป็น dynamic library แบบ C (`cdylib`) เพื่อให้กลายเป็นไฟล์ `.wasm` ได้ และเป็น `rlib` ด้วย เพื่อให้ Rust unit test link มันแบบปกติได้
+
+```toml
+[package]
+name = "crdt"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+```
+
+### 2. `crates/crdt/src/lib.rs`
+
+สอง export `version()` เป็น free function `Clock` เป็น struct ที่มี `#[wasm_bindgen(constructor)]` — ฝั่ง JS มันกลายเป็น `new Clock()` มันเป็น Lamport counter ที่เราจะพึ่งพาหนักเมื่อ CRDT มาถึง: ทุก edit ได้ tick ที่เพิ่มขึ้นแบบ monotonic
+
+```rust
+use wasm_bindgen::prelude::*;
+
+/// A free function — becomes a named export in the generated JS.
+#[wasm_bindgen]
+pub fn version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// A struct exported as a JS class.
+#[wasm_bindgen]
+pub struct Clock {
+    counter: u32,
+}
+
+#[wasm_bindgen]
+impl Clock {
+    /// `#[wasm_bindgen(constructor)]` maps to `new Clock()` in JS.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Clock {
+        Clock { counter: 0 }
+    }
+
+    /// `&mut self` methods mutate the Rust struct that the JS object points at.
+    pub fn tick(&mut self) -> u32 {
+        self.counter += 1;
+        self.counter
+    }
+
+    /// A getter reads without mutating.
+    #[wasm_bindgen(getter)]
+    pub fn now(&self) -> u32 {
+        self.counter
+    }
+}
+```
+
+สังเกตว่า counter เป็น `u32` ไม่ใช่ `u64` โดยตั้งใจ: `u64` ของ Rust ข้ามเข้า JavaScript เป็น `BigInt` ซึ่งเทียบและ serialize ยาก `u32` marshal เป็น `number` ธรรมดา เราตั้งขนาด Lamport clock ตามนั้น — บทถัดไปครอบคลุมว่าทำไม boundary จึงกำหนดทางเลือกเหล่านี้
+
+### 3. Build it: `wasm-pack build --target web`
+
+รันคำสั่งนี้จาก `crates/crdt` มันสร้าง `crates/crdt/pkg/` ที่มี `crdt.js` (loader), `crdt_bg.wasm` (binary) และ `crdt.d.ts` (types)
+
+```bash
+cd crates/crdt
+wasm-pack build --target web
+```
+
+### 4. `apps/web/src/wasm-smoke.ts`
+
+เรียกทั้งสอง export จาก TypeScript default export คือ `init` — คุณต้อง `await` มันครั้งหนึ่งก่อน call อื่นใด เพราะมันคือสิ่งที่ fetch และ instantiate binary `.wasm` path เอื้อมออกจาก `apps/web` เข้าไปใน `pkg/` ที่ build แล้ว
+
+```ts
+import init, { version, Clock } from '../../crates/crdt/pkg/crdt.js';
+
+export async function smokeTest(): Promise<void> {
+  await init(); // fetch + instantiate the .wasm — required before any call
+
+  console.log('crdt version', version());
+
+  const clock = new Clock();
+  clock.tick();
+  clock.tick();
+  console.log('clock.now', clock.now); // getter → 2
+
+  clock.free(); // return the Rust struct's memory (see the next lesson)
+}
+```
+
+## Verify
+
+Build crate แล้วยืนยันว่า output `pkg/` มีอยู่:
+
+```bash
+cd crates/crdt
+wasm-pack build --target web
+ls pkg
+```
+
+คาดหวัง — loader, binary และ type definition อยู่ครบ:
+
+```
+crdt.d.ts   crdt.js   crdt_bg.wasm   crdt_bg.wasm.d.ts   package.json
+```
+
+สำหรับ build check ที่ไม่ต้องใช้ browser ให้รัน Rust test ของ crate เพิ่มโค้ดนี้ลง `lib.rs` แล้วรัน `cargo test`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clock_ticks_monotonically() {
+        let mut c = Clock::new();
+        assert_eq!(c.tick(), 1);
+        assert_eq!(c.tick(), 2);
+        assert_eq!(c.now(), 2);
+    }
+}
+```
+
+```bash
+cargo test
+```
+
+คาดหวัง:
+
+```
+running 1 test
+test tests::clock_ticks_monotonically ... ok
+
+test result: ok. 1 passed; 0 failed
+```
+
+**Check your understanding:**
+
+1. ทำไมคุณต้อง `await init()` ก่อนเรียก `version()` หรือ `new Clock()`?
+2. `#[wasm_bindgen(constructor)]` เปลี่ยนอะไรเกี่ยวกับวิธีที่ JavaScript ใช้ struct `Clock`?
+3. ทำไม `wasm-pack build --target web` เหมาะกับแอป Astro/Vite มากกว่า `--target no-modules`?
+4. ทำไม Lamport counter จึงเป็น type `u32` แทน `u64` สำหรับ WASM boundary?
+
+## Recap
+
+เราตั้ง Rust→WASM toolchain ขึ้นมา: crate `crdt` ที่ export ฟังก์ชันและ struct, build ด้วย `wasm-pack build --target web` แล้วเรียกจาก TypeScript หลัง `await init()` นั่นคือท่อที่ CRDT จะวิ่งบน call `clock.free()` และทางเลือก `u32`-vs-`BigInt` ต่างใบ้ถึงความลึกจริง ๆ — ว่าข้อมูลและ memory ข้ามเส้น JS↔WASM อย่างไร
+
+boundary นั้นคือลำดับต่อไป: [The JS↔WASM boundary →](/offlinenotes/th/wasm-toolchain/the-js-wasm-boundary/)

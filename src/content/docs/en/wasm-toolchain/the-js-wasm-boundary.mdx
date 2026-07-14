@@ -1,0 +1,169 @@
+---
+title: The JS↔WASM boundary
+description: "Pass structs and enums across the boundary with serde-wasm-bindgen, and understand what gets copied and who owns what."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+The [previous lesson](/offlinenotes/en/wasm-toolchain/wasm-bindgen-basics/) passed only numbers and strings across the boundary. The CRDT needs to hand JavaScript whole **ops** — tagged records like an insert or a delete — and take batches of them back for merging. This lesson wires up `serde-wasm-bindgen` so a Rust `enum` becomes a plain JS object and back, and pins down exactly what copies across the line and who is responsible for freeing what.
+
+We'll define the `Op` type the whole app is built around — the same shape stored in IndexedDB and pushed to the sync server — and prove it round-trips. The CRDT that *produces* these ops comes in the next module; here we make the wire format solid first.
+
+## Why
+
+wasm-bindgen marshals primitives and strings on its own, but a Rust struct or enum has no natural JavaScript representation — its memory layout is Rust's business. You have two ways across: serialize to a JSON **string** and `JSON.parse` on the other side, or convert directly to a **JS value** (objects, arrays, numbers) with no string in the middle. `serde-wasm-bindgen` does the second, and it's the right call: no double-encoding, smaller code, and the result is already a live JS object the note store can inspect.
+
+The op format is an **internally tagged** enum: every op is an object with a `t` discriminator — `` `{ "t": "ins", ... }` ``, `` `{ "t": "del", ... }` ``, `` `{ "t": "title", ... }` ``. serde's `#[serde(tag = "t")]` produces exactly that, and serde-wasm-bindgen understands the same tagging on the way back. One Rust definition drives both directions.
+
+The other half is ownership. Rust structs exported to JS (like `NoteDoc`) live on the WASM heap and are reached through a pointer held by a JS object; **ops are different** — they're serialized *copies*, plain JS data with no Rust lifetime attached. Knowing which is which tells you when you must call `.free()` and when the garbage collector already has it.
+
+## Pros & cons
+
+**`serde-wasm-bindgen` vs JSON strings across the boundary**
+- **Pros:** No `JSON.stringify`/`parse` on either side; converts straight to JS objects/arrays; smaller generated code and less work per op. The value you get in JS is immediately usable.
+- **Cons:** One more Rust dependency, and the mapping has rules (enum tagging, maps-as-objects) you must respect or deserialization fails at runtime. For a one-off debug string, `JSON` is simpler.
+
+**Copying ops across vs handing JS a pointer to a live Rust value**
+- **Pros of copying:** The JS side gets independent, GC-managed data it can store in IndexedDB or send over the network without worrying about Rust lifetimes; no `.free()` to remember.
+- **Cons of copying:** Every crossing serializes and allocates. For a big batch that's real work — so we cross the boundary in **batches** (a whole array of ops per call), not once per character, to amortize it.
+
+## Set it up
+
+### 1. `crates/crdt/Cargo.toml` — add serde
+
+```toml
+[dependencies]
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+```
+
+### 2. `crates/crdt/src/lib.rs` — the `Op` type
+
+An element id and a timestamp are both `(counter, actor)` pairs — a Rust tuple, which serde serializes as a two-element JS array `` `[counter, actor]` ``. We alias it for readability. The `#[serde(tag = "t")]` and per-variant `rename` produce the exact wire shapes the rest of the course depends on.
+
+```rust
+use wasm_bindgen::prelude::*;
+use serde::{Serialize, Deserialize};
+
+/// (Lamport counter, actor id) — serializes as `[counter, actor]`.
+pub type Id = (u32, String);
+
+/// The unit of change. Stored in IndexedDB, pushed to the sync server,
+/// applied by `NoteDoc::merge`. Internally tagged on `t`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "t")]
+pub enum Op {
+    /// { "t": "title", "value": string, "ts": [counter, actor] }
+    #[serde(rename = "title")]
+    SetTitle { value: String, ts: Id },
+
+    /// { "t": "ins", "id": [c,a], "after": [c,a] | null, "ch": string }
+    #[serde(rename = "ins")]
+    Insert { id: Id, after: Option<Id>, ch: String },
+
+    /// { "t": "del", "id": [counter, actor] }
+    #[serde(rename = "del")]
+    Delete { id: Id },
+}
+```
+
+### 3. Cross the boundary: `to_value` / `from_value`
+
+`serde_wasm_bindgen::to_value(&value)` takes a **reference** — it reads your Rust value and builds a fresh JS value, leaving the original owned by Rust. `from_value(js)` **consumes** the `JsValue` and produces owned Rust data; using `?` turns a bad shape into a thrown JS error. Note that `from_value` gives you a *copy* — the returned `Vec<Op>` is independent of anything JS still holds.
+
+```rust
+/// Rust → JS: returns an array of ops as a live JS value.
+#[wasm_bindgen]
+pub fn demo_ops() -> JsValue {
+    let ops = vec![
+        Op::SetTitle { value: "Groceries".into(), ts: (1, "A".into()) },
+        Op::Insert { id: (2, "A".into()), after: None, ch: "H".into() },
+    ];
+    // borrows `ops`; `ops` is still owned by Rust and dropped at end of scope
+    serde_wasm_bindgen::to_value(&ops).unwrap()
+}
+
+/// JS → Rust: consumes the JsValue, deserializes to owned Rust data (a copy).
+#[wasm_bindgen]
+pub fn count_ops(val: JsValue) -> Result<usize, JsValue> {
+    let ops: Vec<Op> = serde_wasm_bindgen::from_value(val)?;
+    Ok(ops.len())
+}
+```
+
+### 4. `apps/web/src/boundary-smoke.ts` — round-trip from TypeScript
+
+The object you get from `demo_ops()` is ordinary JS you can log, store, or send. Hand it straight back to `count_ops` and it deserializes cleanly, because both directions read the same serde definition.
+
+```ts
+import init, { demo_ops, count_ops } from '../../crates/crdt/pkg/crdt.js';
+
+export async function boundarySmoke(): Promise<void> {
+  await init();
+
+  const ops = demo_ops();
+  console.log(ops);
+  // [ { t: 'title', value: 'Groceries', ts: [1, 'A'] },
+  //   { t: 'ins', id: [2, 'A'], after: null, ch: 'H' } ]
+
+  console.log('count', count_ops(ops)); // 2
+}
+```
+
+Ownership in one line: `ops` here is GC-managed JS data — no `.free()`. A `NoteDoc` (next module) would be a JS handle to a *live Rust struct*, and that one you must `.free()`.
+
+## Verify
+
+Build the crate so the new exports land in `pkg/`:
+
+```bash
+cd crates/crdt
+wasm-pack build --target web
+```
+
+For a boundary check with no browser, assert the ops round-trip through serde in a Rust test:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn op_json_shape_is_stable() {
+        let op = Op::Insert { id: (2, "A".into()), after: None, ch: "H".into() };
+        let json = serde_json::to_string(&op).unwrap();
+        assert_eq!(json, r#"{"t":"ins","id":[2,"A"],"after":null,"ch":"H"}"#);
+    }
+}
+```
+
+Add `serde_json = "1"` under `[dev-dependencies]`, then run:
+
+```bash
+cargo test
+```
+
+Expected — the wire shape is exactly what the sync server and IndexedDB will store:
+
+```
+running 1 test
+test tests::op_json_shape_is_stable ... ok
+
+test result: ok. 1 passed; 0 failed
+```
+
+**Check your understanding:**
+
+1. Why does `serde-wasm-bindgen` beat serializing ops to a JSON string and calling `JSON.parse` in JS?
+2. What does `#[serde(tag = "t")]` produce in the JS object, and why does the same attribute work for both `to_value` and `from_value`?
+3. `to_value` takes `&T` but `from_value` takes `JsValue` by value. What does that tell you about which side owns the data afterward?
+4. A `Vec<Op>` returned from `from_value` needs no `.free()`, but a `NoteDoc` handle does. Why the difference?
+
+## Recap
+
+We defined the `Op` enum — the app's wire format — and moved whole batches of ops across the boundary with `serde_wasm_bindgen::to_value`/`from_value`, no JSON string in the middle. We nailed down ownership: ops are copies the GC manages; exported Rust structs are live handles you free. Crossing in batches keeps the copy cost amortized.
+
+With the toolchain and the boundary solid, we can build the thing that produces these ops: [A CRDT in Rust →](/offlinenotes/en/crdt-rust/).
