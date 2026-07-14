@@ -1,0 +1,163 @@
+---
+title: The Astro Shell
+description: "สร้าง Astro app shell และ layout, นิยาม route เดียวของแอป, แล้ว mount custom element <offline-notes-app>"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+โครง static ที่ทั้งแอปอาศัยอยู่ข้างใน ในบทนี้ `apps/web` ได้ **layout** ที่ใช้ซ้ำได้ (`AppShell.astro`) ซึ่ง render เอกสาร HTML — `<head>`, viewport, theme color, global styles — และได้ **route เดียว** (`index.astro`) ที่ mount custom element ตัวหนึ่งชื่อ `<offline-notes-app>` เราลงทะเบียน element ตัวนั้นเวอร์ชัน minimal ด้วย เพื่อให้คุณเห็นมัน upgrade ใน browser ตอนนี้มัน render แค่ header; [next lesson](/offlinenotes/th/app-shell/first-web-components/) จะทำให้มันโตเป็น UI สองแพเนลจริง
+
+## Why
+
+OfflineNotes เป็น **single-page app ที่บังเอิญสร้างด้วยเครื่องมือ static-site** ไม่มี server route ให้ render ต่อ request — แอป boot ครั้งเดียว แล้วรันทั้งหมดใน browser กับ IndexedDB ดังนั้นงานของ Astro ตรงนี้แคบและตั้งใจ: ปล่อย static HTML shell **หนึ่ง** ตัวที่ Service Worker precache ได้ตรงตัว แล้วส่งการควบคุมให้ custom elements ทันทีที่มัน load
+
+- **layout เป็นเจ้าของเอกสาร** ทุกอย่างที่ควรอยู่ใน `<head>` — charset, viewport, `theme-color`, ภายหลังคือ manifest link — อยู่ใน `AppShell.astro` ตัวเดียว ดังนั้นทุกหน้า (จริง ๆ มีหน้าเดียว) จึงสม่ำเสมอ และ metadata ของ PWA มีบ้านหลังเดียว
+- **route เป็นจุด mount ไม่ใช่ UI** `index.astro` render `<offline-notes-app>` แล้วไม่มีอะไรอีก interface จริงนิยามใน TypeScript custom elements แยกออกจาก component model ของ Astro เพื่อให้ portable แบบ plain-web-platform และเข้าใจง่ายตอน offline
+- **root เป็น custom element ไม่ใช่ `<div>`** การใช้ `<offline-notes-app>` เป็น top-level tag หมายความว่าแอป bootstrap ตัวเองใน `connectedCallback` — ไม่มี glue แบบ imperative `mount(document.getElementById('app'))` และใช้ lifecycle เดียวกับที่ทุก child component ใช้
+
+## Pros & cons
+
+**Astro static shell เทียบกับ client-rendered SPA framework (React/Vue) สำหรับ shell**
+
+- **Pros:** shell เป็น HTML จริงตั้งแต่ paint แรกและ cache-friendly สำหรับ Service Worker; ไม่มี framework runtime ส่งไปสำหรับตัวโครงเลย; metadata `<head>`/PWA มี source เดียวที่เชื่อถือได้
+- **Cons:** มี mental model สองแบบอยู่ร่วมกัน (`.astro` build-time components เทียบกับ runtime custom elements); ฟีเจอร์ที่รวยกว่าของ Astro (islands, SSR) ไม่ได้ใช้ บางส่วนของเครื่องมือจึงเป็นน้ำหนักส่วนเกินตรงนี้
+
+**custom element (`<offline-notes-app>`) เป็น root ของแอป เทียบกับ mount เข้า `<div id="app">` ธรรมดา**
+
+- **Pros:** bootstrap ตัวเองผ่าน element lifecycle มาตรฐาน; ไม่มีการต่อสายแบบ imperative; สมมาตรกับทุก child component
+- **Cons:** ไม่มีอะไร render จนกว่า script ที่นิยามมันจะ load และ element จะ upgrade คุณจึงต้องออกแบบเผื่อสถานะยังไม่ upgrade (แวบของโครงเปล่า ๆ) แทนที่จะเป็น content ที่ render จาก server
+
+## Set it up
+
+### 1. `apps/web/src/layouts/AppShell.astro`
+
+โครงเอกสาร มันรับ prop `title`, ตั้ง `<head>` แบบ PWA-friendly, ส่ง global CSS เล็ก ๆ, แล้วหย่อน content ของหน้าเข้าไปใน `<slot />`
+
+```astro
+---
+interface Props {
+  title: string;
+}
+const { title } = Astro.props;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0D9488" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    --accent: #0d9488;
+    font-family: system-ui, sans-serif;
+  }
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0;
+  }
+  .app-header {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  .app-header h1 {
+    margin: 0;
+    font-size: 1.1rem;
+    color: var(--accent);
+  }
+</style>
+```
+
+`is:global` บน `<style>` บอก Astro ไม่ให้ scope กฎเหล่านั้น — custom elements ของเรา render ใน light DOM มันจึงต้องการให้ style เข้าถึงได้
+
+### 2. `apps/web/src/scripts/offline-notes-app.ts`
+
+root custom element `connectedCallback` รันเมื่อ browser แทรก element เข้ามา แล้วเรา render chrome ของ shell ลงไปในมัน ตอนนี้มันตั้งใจให้บางไว้ — header กับ body เปล่า ๆ ที่บทถัดไปจะเติม
+
+```ts
+export class OfflineNotesApp extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <header class="app-header"><h1>OfflineNotes</h1></header>
+      <main class="app-body">
+        <!-- <note-list> and <note-editor> mount here next lesson -->
+      </main>
+    `;
+  }
+}
+
+customElements.define('offline-notes-app', OfflineNotesApp);
+```
+
+### 3. `apps/web/src/pages/index.astro`
+
+route เดียว มันใช้ layout, render root element, และ — ผ่าน client `<script>` — import module ที่นิยามมัน Astro bundle script นั้นแล้วส่งไปที่ browser; side effect ของ import คือการเรียก `customElements.define`
+
+```astro
+---
+import AppShell from '../layouts/AppShell.astro';
+---
+<AppShell title="OfflineNotes">
+  <offline-notes-app></offline-notes-app>
+</AppShell>
+
+<script>
+  import '../scripts/offline-notes-app.ts';
+</script>
+```
+
+หน้านี้แทนที่หน้า smoke-test แบบใช้แล้วทิ้งจาก module ก่อนหน้า
+
+## Verify
+
+เริ่ม dev server จาก root ของ repo (ตัวนี้ rebuild WASM package ก่อนด้วย):
+
+```bash
+pnpm dev
+```
+
+เปิด `http://localhost:4321/` คุณควรเห็น header **OfflineNotes** render ในสี teal accent เปิด DevTools → **Elements** แล้วยืนยันว่า root element upgrade แล้ว — ตอนนี้มันบรรจุ markup ของ header แทนที่จะเปล่า:
+
+```html
+<offline-notes-app>
+  <header class="app-header"><h1>OfflineNotes</h1></header>
+  <main class="app-body">…</main>
+</offline-notes-app>
+```
+
+ทีนี้ run check — ผลิต static build ที่ Service Worker จะ precache ภายหลัง:
+
+```bash
+pnpm build
+```
+
+ที่คาดว่าจะเห็น: Astro รายงานว่า build สำเร็จ โดยปล่อยหนึ่งหน้าไปที่ `apps/web/dist/`:
+
+```
+▶ src/pages/index.astro
+  └─ /index.html (+NNms)
+ astro  Complete!
+```
+
+**Check your understanding:**
+
+1. `index.astro` render `<offline-notes-app></offline-notes-app>` แต่ content ของ element ปรากฏหลังจากหน้า load เท่านั้น อะไรต้องเกิดขึ้นระหว่างที่ HTML ถูก parse กับตอนที่ content ปรากฏ?
+2. ทำไม `<style>` ของ layout ถึงมาร์ก `is:global` — อะไรจะพังถ้าไม่มีมัน เมื่อพิจารณาว่า component ของเรา render ที่ไหน?
+3. route ไม่มี UI เลยนอกจาก tag เดียว interface จริงมาจากไหน และทำไมเก็บมันไว้นอกไฟล์ `.astro`?
+4. ทำไม `<head>` (viewport, `theme-color`) ถึงควรอยู่ใน layout แทนที่จะอยู่ใน custom element?
+
+## Recap
+
+`apps/web` มี shell จริงแล้ว: `AppShell.astro` เป็นเจ้าของเอกสารและ global styles, `index.astro` เป็น route เดียว, และ `<offline-notes-app>` mount และ upgrade เป็น root element ที่ render ตัวเองได้ มันเป็นโครงที่มี header — โครงสร้างที่ UI ทั้งหมดยึดไว้
+
+ต่อไป นิยาม component ที่เติมโครงนั้น — root ที่ประกอบโครง `<note-list>` และ `<note-editor>`: [First Web Components →](/offlinenotes/th/app-shell/first-web-components/)

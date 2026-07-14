@@ -1,0 +1,192 @@
+---
+title: First Web Components
+description: "นิยามโครง custom-element <note-list> และ <note-editor> แล้วประกอบมันเข้าไปใน <offline-notes-app> — โครงสร้างและ event ยังไม่มีข้อมูล"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+custom elements สามตัวที่ประกอบเป็น notes UI ในรูป **โครง** `<note-list>` render แพเนล list พร้อมปุ่ม **New**; `<note-editor>` render input ชื่อและ textarea body แบบ markdown; และ `<offline-notes-app>` ประกอบมันเข้าเป็น layout สองแพเนล ตอนนี้ **ยังไม่มีข้อมูลและยังไม่มี persistence** — list ว่าง, editor แก้อะไรที่ไม่ได้ save สิ่งที่โครงเหล่านี้นิยามคือ **รูปร่างและ event** (`note-new`, `note-change`) ที่ module ต่อ ๆ ไปจะต่อสายเข้ากับ IndexedDB และ CRDT
+
+## Why
+
+การทำให้ขอบเขต component และ event contract ของมันถูกต้อง *ก่อน* ที่ข้อมูลจะไหลผ่าน คือจุดสำคัญทั้งหมดของบทนี้ พอ IndexedDB และ WASM engine มาถึง element เหล่านี้ไม่ควรต้องรื้อโครงสร้าง — แค่ handler ของมันได้เนื้อใน เราจึงตกลงสามเรื่องตอนนี้:
+
+- **custom elements ไม่ใช่ framework** UI เล็กและอยู่ยาว; component model ของ web platform เอง (custom elements) หมายความว่าไม่มี framework runtime ให้ต้องส่ง, cache หรือเก็บไว้ใช้ offline และทุกชิ้นใช้ lifecycle `connectedCallback` เดียวกับ root
+- **light DOM ไม่ใช่ shadow DOM** component เหล่านี้ render ลงใน light DOM เพื่อให้ global CSS ของ layout style มันได้ตรง ๆ และบทถัด ๆ ไป query ข้ามมันได้ง่าย การ encapsulate ของ shadow DOM จะเสียมากกว่าได้ที่สเกลนี้ — เป็น tradeoff ที่เราเลือกอย่างตั้งใจ
+- **สื่อสารด้วย event** โครง `<note-list>` ไม่รู้ว่า note *คือ* อะไร; มันแค่ fire event `note-new` แบบ bubble parent (สุดท้ายคือ note store) ตัดสินว่ามันหมายความว่าอะไร นี่ทำให้ component แยกตัวออกจาก data model ที่ยังไม่มี
+
+## Pros & cons
+
+**vanilla custom elements เทียบกับ component framework (React, Lit)**
+
+- **Pros:** ไม่มี runtime ให้ download หรือ precache; ไม่มีอะไรต้องทำให้ทำงานตอน offline นอกจาก platform เอง; lifecycle เดียวกันทุกที่; ไม่มี build-time coupling กับ framework
+- **Cons:** ไม่มี reactive re-render หรือ templating มาให้ — คุณเขียน `innerHTML` และ event listener เอง; ไม่มี ecosystem ของ component สำเร็จรูป
+
+**light DOM เทียบกับ shadow DOM สำหรับ component เหล่านี้**
+
+- **Pros:** global CSS จาก layout apply ได้ตรง ๆ; การ query ข้าม component และ form ทำงานตามปกติ; inspect และ debug ง่ายกว่า
+- **Cons:** ไม่มีการ encapsulate style/DOM — global selector หลงทางเข้ามารั่วได้; คุณต้องมีวินัยกับชื่อ class เพื่อเลี่ยงการชนกัน
+
+## Set it up
+
+### 1. `apps/web/src/scripts/note-list.ts`
+
+โครงแพเนล list มัน render header ที่มีปุ่ม **New** และ `<ul>` เปล่า การคลิก **New** dispatch event `note-new` แบบ bubble — parent จะจัดการเรื่องสร้าง note ภายหลัง; component แค่ประกาศเจตนา
+
+```ts
+export class NoteList extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="note-list-header">
+        <h2>Notes</h2>
+        <button type="button" data-action="new">New</button>
+      </div>
+      <ul class="note-list-items"></ul>
+    `;
+
+    this.querySelector('[data-action="new"]')?.addEventListener('click', () => {
+      this.dispatchEvent(new CustomEvent('note-new', { bubbles: true }));
+    });
+  }
+}
+
+customElements.define('note-list', NoteList);
+```
+
+### 2. `apps/web/src/scripts/note-editor.ts`
+
+โครง editor: input ชื่อและ textarea body ทั้งคู่ emit event `note-change` แบบ bubble ตอน input ยังไม่มีอะไร save — นี่คือพื้นผิวที่ CRDT จะเปลี่ยนเป็น op ภายหลัง
+
+```ts
+export class NoteEditor extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <input class="note-title" type="text" placeholder="Untitled note" />
+      <textarea class="note-body" placeholder="Write in markdown…"></textarea>
+    `;
+
+    const title = this.querySelector<HTMLInputElement>('.note-title');
+    const body = this.querySelector<HTMLTextAreaElement>('.note-body');
+
+    title?.addEventListener('input', () => this.emitChange());
+    body?.addEventListener('input', () => this.emitChange());
+  }
+
+  private emitChange() {
+    this.dispatchEvent(new CustomEvent('note-change', { bubbles: true }));
+  }
+}
+
+customElements.define('note-editor', NoteEditor);
+```
+
+### 3. `apps/web/src/scripts/offline-notes-app.ts` — compose the panes
+
+อัปเดต root element ให้ render สอง component เคียงข้างกัน การ import module ของมันไว้ด้านบนรับประกันว่า `<note-list>` และ `<note-editor>` ถูกนิยามก่อนที่ root จะ render มัน
+
+```ts
+import './note-list.ts';
+import './note-editor.ts';
+
+export class OfflineNotesApp extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <header class="app-header"><h1>OfflineNotes</h1></header>
+      <div class="app-body">
+        <note-list></note-list>
+        <note-editor></note-editor>
+      </div>
+    `;
+  }
+}
+
+customElements.define('offline-notes-app', OfflineNotesApp);
+```
+
+### 4. `apps/web/src/layouts/AppShell.astro` — style the two panes
+
+เพิ่มกฎ layout ลงใน block `<style is:global>` ที่มีอยู่ เพื่อให้ body แบ่งเป็น sidebar และ editor:
+
+```css
+.app-body {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  height: calc(100vh - 48px);
+}
+.note-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+}
+note-list {
+  border-right: 1px solid #e5e7eb;
+  overflow-y: auto;
+}
+note-editor {
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem 1rem;
+  gap: 0.5rem;
+}
+note-editor .note-body {
+  flex: 1;
+  resize: none;
+}
+.note-title {
+  font-size: 1.1rem;
+  border: none;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 0.25rem 0;
+}
+```
+
+การ style selector `note-list` / `note-editor` เปล่า ๆ ใช้ได้เพราะ custom elements เป็น element ธรรมดาใน light DOM
+
+## Verify
+
+รัน dev server จาก root ของ repo:
+
+```bash
+pnpm dev
+```
+
+เปิด `http://localhost:4321/` คุณควรเห็น layout **สองแพเนล**: sidebar "Notes" พร้อมปุ่ม **New** ทางซ้าย และ input ชื่อเหนือ textarea body ทางขวา พิมพ์ในช่องใดก็ได้ — มันรับ input ได้อิสระ (ยังไม่มีอะไร save; นั่นคือสิ่งที่คาดไว้)
+
+ยืนยันว่า event fire ใน DevTools → **Console** ผูก listener เร็ว ๆ แล้วคลิก **New** และพิมพ์ใน editor:
+
+```js
+document.querySelector('offline-notes-app')
+  .addEventListener('note-new', () => console.log('note-new'));
+document.querySelector('offline-notes-app')
+  .addEventListener('note-change', () => console.log('note-change'));
+```
+
+การคลิก **New** log `note-new`; การพิมพ์ log `note-change` — พิสูจน์ว่า event bubble ขึ้นไปถึง root พร้อมให้จัดการ
+
+ทีนี้ run check — build แอปแบบ static:
+
+```bash
+pnpm build
+```
+
+ที่คาดว่าจะเห็น: build สะอาดโดยปล่อย `/index.html` ไปที่ `apps/web/dist/`:
+
+```
+ astro  Complete!
+```
+
+**Check your understanding:**
+
+1. `<note-list>` fire `note-new` แต่ไม่เคยสร้าง note ทำไมนั่นถึงเป็นจุดที่ *ถูกต้อง* ที่จะหยุด และใครจะเป็นคนจัดการ event ในที่สุด?
+2. ทำไม `offline-notes-app.ts` ถึง `import` module ของ list และ editor ไว้ด้านบน แทนที่จะพึ่งให้หน้าเป็นคน load มัน?
+3. เราเลือก light DOM แทน shadow DOM เราได้อะไรมาสำหรับการ style และ query และมันต้องแลกด้วยวินัยอะไร?
+4. component emit custom event แบบ **bubble** ทำไม bubble ถึงสำคัญต่อวิธีที่ root (และภายหลังคือ note store) listen?
+
+## Recap
+
+notes UI มีโครงสร้างแล้ว: `<note-list>` และ `<note-editor>` ถูกนิยาม, `<offline-notes-app>` ประกอบมันเข้าเป็น shell สองแพเนล และมันพูด event contract `note-new` / `note-change` ที่ module ต่อ ๆ ไปจะเชื่อมเข้ากับข้อมูลจริง ยังไม่มี persistence — แค่โครงที่สะอาดและแยกตัวออกจากกัน
+
+นั่นจบ App Shell ต่อไป ให้ component เหล่านี้มีอะไรให้อ่านและเขียน: typed IndexedDB store ที่กลายเป็น source of truth ของ client: [IndexedDB Foundation →](/offlinenotes/th/indexeddb/)

@@ -1,0 +1,163 @@
+---
+title: The Astro Shell
+description: "Build the Astro app shell and layout, define the single app route, and mount the <offline-notes-app> custom element."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+The static frame the whole app lives inside. In this lesson `apps/web` gets a reusable **layout** (`AppShell.astro`) that renders the HTML document — `<head>`, viewport, theme color, global styles — and a **single route** (`index.astro`) that mounts one custom element, `<offline-notes-app>`. We also register a minimal version of that element so you can see it upgrade in the browser. It renders just a header for now; the [next lesson](/offlinenotes/en/app-shell/first-web-components/) grows it into the real two-pane UI.
+
+## Why
+
+OfflineNotes is a **single-page app that happens to be built with a static-site tool**. There are no server routes to render per request — the app boots once, then runs entirely in the browser against IndexedDB. So Astro's job here is narrow and deliberate: emit **one** static HTML shell that a Service Worker can precache verbatim, and hand control to custom elements as soon as it loads.
+
+- **The layout owns the document.** Everything that belongs in `<head>` — charset, viewport, `theme-color`, later the manifest link — lives in one `AppShell.astro`, so every page (there's really one) is consistent and the PWA metadata has a single home.
+- **The route is a mount point, not a UI.** `index.astro` renders `<offline-notes-app>` and nothing else. The actual interface is defined in TypeScript custom elements, kept out of Astro's component model so it's plain-web-platform portable and easy to reason about offline.
+- **The root is a custom element, not a `<div>`.** Using `<offline-notes-app>` as the top-level tag means the app bootstraps itself in `connectedCallback` — no imperative `mount(document.getElementById('app'))` glue, and the same lifecycle every child component uses.
+
+## Pros & cons
+
+**Astro static shell vs. a client-rendered SPA framework (React/Vue) for the shell**
+
+- **Pros:** The shell is real HTML on first paint and cache-friendly for the Service Worker; zero framework runtime ships for the frame itself; the `<head>`/PWA metadata has one authoritative source.
+- **Cons:** Two mental models coexist (`.astro` build-time components vs. runtime custom elements); Astro's richer features (islands, SSR) go unused, so some of the tool is dead weight here.
+
+**A custom element (`<offline-notes-app>`) as the app root vs. mounting into a plain `<div id="app">`**
+
+- **Pros:** Self-bootstrapping via the standard element lifecycle; no imperative wiring; symmetrical with every child component.
+- **Cons:** Nothing renders until the defining script loads and the element upgrades, so you must design for the un-upgraded state (a flash of empty frame) rather than server-rendered content.
+
+## Set it up
+
+### 1. `apps/web/src/layouts/AppShell.astro`
+
+The document shell. It takes a `title` prop, sets the PWA-friendly `<head>`, ships a little global CSS, and drops the page's content into a `<slot />`.
+
+```astro
+---
+interface Props {
+  title: string;
+}
+const { title } = Astro.props;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0D9488" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    --accent: #0d9488;
+    font-family: system-ui, sans-serif;
+  }
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0;
+  }
+  .app-header {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  .app-header h1 {
+    margin: 0;
+    font-size: 1.1rem;
+    color: var(--accent);
+  }
+</style>
+```
+
+`is:global` on the `<style>` tells Astro not to scope those rules — our custom elements render in the light DOM, so they need the styles to reach them.
+
+### 2. `apps/web/src/scripts/offline-notes-app.ts`
+
+The root custom element. `connectedCallback` runs when the browser inserts the element, and we render the shell's chrome into it. It's intentionally thin now — a header and an empty body the next lesson fills.
+
+```ts
+export class OfflineNotesApp extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <header class="app-header"><h1>OfflineNotes</h1></header>
+      <main class="app-body">
+        <!-- <note-list> and <note-editor> mount here next lesson -->
+      </main>
+    `;
+  }
+}
+
+customElements.define('offline-notes-app', OfflineNotesApp);
+```
+
+### 3. `apps/web/src/pages/index.astro`
+
+The single route. It uses the layout, renders the root element, and — via a client `<script>` — imports the module that defines it. Astro bundles that script and ships it to the browser; the import's side effect is the `customElements.define` call.
+
+```astro
+---
+import AppShell from '../layouts/AppShell.astro';
+---
+<AppShell title="OfflineNotes">
+  <offline-notes-app></offline-notes-app>
+</AppShell>
+
+<script>
+  import '../scripts/offline-notes-app.ts';
+</script>
+```
+
+This replaces the throwaway smoke-test page from the previous module.
+
+## Verify
+
+Start the dev server from the repo root (this also rebuilds the WASM package first):
+
+```bash
+pnpm dev
+```
+
+Open `http://localhost:4321/`. You should see the **OfflineNotes** header rendered in the teal accent color. Open DevTools → **Elements** and confirm the root element upgraded — it now contains the header markup rather than being empty:
+
+```html
+<offline-notes-app>
+  <header class="app-header"><h1>OfflineNotes</h1></header>
+  <main class="app-body">…</main>
+</offline-notes-app>
+```
+
+Now the run check — produce the static build the Service Worker will later precache:
+
+```bash
+pnpm build
+```
+
+Expected: Astro reports a successful build with one page emitted to `apps/web/dist/`:
+
+```
+▶ src/pages/index.astro
+  └─ /index.html (+NNms)
+ astro  Complete!
+```
+
+**Check your understanding:**
+
+1. `index.astro` renders `<offline-notes-app></offline-notes-app>`, but the element's content appears only after the page loads. What has to happen between HTML parse and content appearing?
+2. Why is the layout's `<style>` marked `is:global` — what would break without it, given where our components render?
+3. The route contains no UI beyond one tag. Where does the actual interface come from, and why keep it out of `.astro` files?
+4. Why does the `<head>` (viewport, `theme-color`) belong in the layout rather than the custom element?
+
+## Recap
+
+`apps/web` now has a real shell: `AppShell.astro` owns the document and global styles, `index.astro` is the single route, and `<offline-notes-app>` mounts and upgrades into a self-rendering root element. It's a frame with a header — the structure the whole UI hangs off.
+
+Next, define the components that fill that frame — the root composing `<note-list>` and `<note-editor>` skeletons: [First Web Components →](/offlinenotes/en/app-shell/first-web-components/).

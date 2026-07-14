@@ -1,0 +1,192 @@
+---
+title: First Web Components
+description: "Define the <note-list> and <note-editor> custom-element skeletons and compose them inside <offline-notes-app> — structure and events, no data yet."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+The three custom elements that make up the notes UI, as **skeletons**. `<note-list>` renders a list panel with a **New** button; `<note-editor>` renders a title input and a markdown body textarea; and `<offline-notes-app>` composes them into a two-pane layout. There's **no data and no persistence yet** — the list is empty, the editor edits nothing that's saved. What the skeletons do define is the **shape and the events** (`note-new`, `note-change`) that later modules wire to IndexedDB and the CRDT.
+
+## Why
+
+Getting the component boundaries and their event contract right *before* data flows through them is the whole point of this lesson. Once IndexedDB and the WASM engine arrive, these elements shouldn't need restructuring — only their handlers get bodies. So we settle three things now:
+
+- **Custom elements, not a framework.** The UI is small and long-lived; the web platform's own component model (custom elements) means no framework runtime to ship, cache, or keep offline, and every piece uses the same `connectedCallback` lifecycle as the root.
+- **Light DOM, not shadow DOM.** These components render into the light DOM so the layout's global CSS styles them directly and later lessons can query across them easily. Shadow DOM's encapsulation would cost us more than it buys at this scale — a tradeoff we make on purpose.
+- **Communicate with events.** A skeleton `<note-list>` doesn't know what a note *is*; it just fires a bubbling `note-new` event. The parent (eventually the note store) decides what that means. This keeps the components decoupled from the data model that doesn't exist yet.
+
+## Pros & cons
+
+**Vanilla custom elements vs. a component framework (React, Lit)**
+
+- **Pros:** Zero runtime to download or precache; nothing to keep working offline but the platform itself; the same lifecycle everywhere; no build-time framework coupling.
+- **Cons:** No reactive re-render or templating out of the box — you write `innerHTML` and event listeners by hand; no ecosystem of ready-made components.
+
+**Light DOM vs. shadow DOM for these components**
+
+- **Pros:** Global CSS from the layout applies directly; cross-component queries and forms behave normally; simpler to inspect and debug.
+- **Cons:** No style/DOM encapsulation — a stray global selector can leak in; you must be disciplined with class names to avoid collisions.
+
+## Set it up
+
+### 1. `apps/web/src/scripts/note-list.ts`
+
+The list panel skeleton. It renders a header with a **New** button and an empty `<ul>`. Clicking **New** dispatches a bubbling `note-new` event — the parent will handle creating a note later; the component just announces intent.
+
+```ts
+export class NoteList extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="note-list-header">
+        <h2>Notes</h2>
+        <button type="button" data-action="new">New</button>
+      </div>
+      <ul class="note-list-items"></ul>
+    `;
+
+    this.querySelector('[data-action="new"]')?.addEventListener('click', () => {
+      this.dispatchEvent(new CustomEvent('note-new', { bubbles: true }));
+    });
+  }
+}
+
+customElements.define('note-list', NoteList);
+```
+
+### 2. `apps/web/src/scripts/note-editor.ts`
+
+The editor skeleton: a title input and a body textarea. Both emit a bubbling `note-change` event on input. Nothing is saved yet — this is the surface the CRDT will later turn into ops.
+
+```ts
+export class NoteEditor extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <input class="note-title" type="text" placeholder="Untitled note" />
+      <textarea class="note-body" placeholder="Write in markdown…"></textarea>
+    `;
+
+    const title = this.querySelector<HTMLInputElement>('.note-title');
+    const body = this.querySelector<HTMLTextAreaElement>('.note-body');
+
+    title?.addEventListener('input', () => this.emitChange());
+    body?.addEventListener('input', () => this.emitChange());
+  }
+
+  private emitChange() {
+    this.dispatchEvent(new CustomEvent('note-change', { bubbles: true }));
+  }
+}
+
+customElements.define('note-editor', NoteEditor);
+```
+
+### 3. `apps/web/src/scripts/offline-notes-app.ts` — compose the panes
+
+Update the root element to render the two components side by side. Importing their modules at the top guarantees `<note-list>` and `<note-editor>` are defined before the root renders them.
+
+```ts
+import './note-list.ts';
+import './note-editor.ts';
+
+export class OfflineNotesApp extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <header class="app-header"><h1>OfflineNotes</h1></header>
+      <div class="app-body">
+        <note-list></note-list>
+        <note-editor></note-editor>
+      </div>
+    `;
+  }
+}
+
+customElements.define('offline-notes-app', OfflineNotesApp);
+```
+
+### 4. `apps/web/src/layouts/AppShell.astro` — style the two panes
+
+Add layout rules to the existing global `<style is:global>` block so the body splits into a sidebar and an editor:
+
+```css
+.app-body {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  height: calc(100vh - 48px);
+}
+.note-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+}
+note-list {
+  border-right: 1px solid #e5e7eb;
+  overflow-y: auto;
+}
+note-editor {
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem 1rem;
+  gap: 0.5rem;
+}
+note-editor .note-body {
+  flex: 1;
+  resize: none;
+}
+.note-title {
+  font-size: 1.1rem;
+  border: none;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 0.25rem 0;
+}
+```
+
+Styling a bare `note-list` / `note-editor` selector works because custom elements are ordinary elements in the light DOM.
+
+## Verify
+
+Run the dev server from the repo root:
+
+```bash
+pnpm dev
+```
+
+Open `http://localhost:4321/`. You should see a **two-pane** layout: a "Notes" sidebar with a **New** button on the left, and a title input over a body textarea on the right. Type in either field — it accepts input freely (nothing is saved; that's expected).
+
+Confirm the events fire. In DevTools → **Console**, attach a quick listener, then click **New** and type in the editor:
+
+```js
+document.querySelector('offline-notes-app')
+  .addEventListener('note-new', () => console.log('note-new'));
+document.querySelector('offline-notes-app')
+  .addEventListener('note-change', () => console.log('note-change'));
+```
+
+Clicking **New** logs `note-new`; typing logs `note-change` — proving the events bubble up to the root, ready to be handled.
+
+Now the run check — build the app statically:
+
+```bash
+pnpm build
+```
+
+Expected: a clean build with `/index.html` emitted to `apps/web/dist/`:
+
+```
+ astro  Complete!
+```
+
+**Check your understanding:**
+
+1. `<note-list>` fires `note-new` but never creates a note. Why is that the *right* place to stop, and who will eventually handle the event?
+2. Why does `offline-notes-app.ts` `import` the list and editor modules at the top instead of relying on the page to load them?
+3. We chose light DOM over shadow DOM. What do we gain for styling and querying, and what discipline does it cost us?
+4. The components emit **bubbling** custom events. Why does bubbling matter for how the root (and later the note store) listens?
+
+## Recap
+
+The notes UI has structure: `<note-list>` and `<note-editor>` are defined, `<offline-notes-app>` composes them into a two-pane shell, and they already speak the `note-new` / `note-change` event contract that later modules connect to real data. No persistence yet — just clean, decoupled skeletons.
+
+That completes the App Shell. Next, give these components something to read and write: a typed IndexedDB store that becomes the client's source of truth: [IndexedDB Foundation →](/offlinenotes/en/indexeddb/).
