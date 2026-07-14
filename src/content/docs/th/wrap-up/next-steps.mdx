@@ -1,0 +1,58 @@
+---
+title: Next steps
+description: "Concrete extensions to OfflineNotes — each with what it teaches and exactly where it plugs into the app you built."
+sidebar:
+  order: 2
+---
+
+การทำให้ง่ายที่ตั้งชื่อไว้ใน[recap](/offlinenotes/th/wrap-up/recap/) คือ to-do list ที่ปลอมตัวมา แต่ละข้อด้านล่างเป็น extension จริงที่ครบในตัว: มันสอนอะไร และมันเสียบเข้าที่ไหนใน codebase เลือกช่องว่างที่คุณรู้สึกน่ารำคาญที่สุดตอน build — นั่นคือตัวที่คุณจะเรียนรู้มากที่สุดจากการปิดมัน
+
+## Op compaction and garbage collection
+
+**What it teaches:** ระบบ CRDT จริงอยู่ในขอบเขตได้อย่างไร RGA ของคุณเก็บ tombstone ไว้ทุกการลบและไม่เคยทิ้ง op เลย ดังนั้นประวัติของ note ที่แก้ไขหนัก ๆ จะโตไปเรื่อย ไม่รู้จบ compaction — การ snapshot state แล้วทิ้งประวัติที่ทุก replica เห็นแล้ว — คือส่วนที่ยากและน่าสนใจที่ production CRDT แก้
+
+**Where it plugs in:** snapshot `docs` ใน IndexedDB และ `outbox`/op log เพิ่ม "stable version" ที่ทุกอุปกรณ์ ack แล้ว (sync server track `head` ต่อ note อยู่แล้ว) จากนั้น rewrite snapshot โดยไม่มี tombstone ที่ต่ำกว่านั้น นี่คือ fix ตรง ๆ ของข้อแม้เรื่องการโตไม่มีขอบเขต
+
+## Adopt Automerge or Yjs
+
+**What it teaches:** library CRDT ระดับ production ให้อะไรที่ตัวเขียนเองไม่ให้ — rich text พร้อม formatting, โครงสร้าง nested, binary encoding ที่มีประสิทธิภาพ และงานด้านความถูกต้องที่สั่งสมมาหลายปี การสลับตัวของคุณออกคือวิธีที่ดีที่สุดในการซึ้งว่าคุณกำลังแก้และไม่ได้แก้ปัญหาไหนกันแน่
+
+**Where it plugs in:** แทนที่ engine `crates/crdt` และ wrapper `NoteDoc` คงขอบเขต store เดิมไว้ — `apply local edit → op`, `merge(ops)`, `text()` — แล้ว client, layout ของ IndexedDB และ sync protocol ส่วนใหญ่รอดจากการสลับ การที่แอป *ทน* ต่อการเปลี่ยนแปลงนี้ได้เองก็คือผลตอบแทนของดีไซน์ thin-relay
+
+## End-to-end encryption of ops
+
+**What it teaches:** local-first และ zero-knowledge เข้ากันได้อย่างไร เพราะ server แค่ relay opaque ops และไม่เคย merge มันจึงไม่เคยต้อง *อ่าน* ops — ดังนั้นคุณ encrypt ops บน client ได้ก่อนที่มันจะออกจากอุปกรณ์เลย
+
+**Where it plugs in:** รอยต่อ push/pull encrypt แต่ละ op ด้วย key ต่อ note (WebCrypto) ตอนมันออกจาก `outbox`; decrypt ตอน pull ก่อน `NoteDoc.merge` server เก็บ ciphertext และไม่รู้อะไรเลย ตรงนี้พึ่งพาการที่ server โง่โดยตั้งใจโดยตรง
+
+## Presence and awareness
+
+**What it teaches:** ความต่างระหว่าง state แบบ *persistent* (CRDT ของคุณ ที่ต้องลู่เข้าและรอด) กับ state แบบ *ephemeral* (ใครออนไลน์ cursor อยู่ตรงไหน) ที่ทิ้งได้และไม่ควรอยู่ใน op log
+
+**Where it plugs in:** channel แยกแบบชั่วคราว — WebSocket บน sync Worker (Durable Object เป็น coordinator ตามธรรมชาติ) ที่ส่ง awareness update ซึ่งไม่เคยถูกเขียนลง IndexedDB render มันใน `<sync-status>` หรือเป็น remote cursor ใน `<note-editor>`
+
+## Real auth and shared multi-user docs
+
+**What it teaches:** identity และ authorization บน sync — เปลี่ยน "ใครก็ตามที่รู้ note id ก็ append ได้" ให้เป็นความเป็นเจ้าของและการแชร์จริง
+
+**Where it plugs in:** route ของ sync server และ scheme ของ note id ใส่ auth บน `POST/GET /docs/:id/ops`, ผูก `actor_id` เข้ากับ identity ของ user จริง และเพิ่ม sharing model (ใคร read/append note ไหนได้) `actorId` ของ client ใน `meta` กลายเป็น principal จริงแทน device id แบบสุ่ม
+
+## Server-side history and snapshots with Durable Objects
+
+**What it teaches:** ทำให้ relay ทำมากขึ้นนิดหน่อยได้อย่างไรโดยไม่ทำให้มันเป็นเจ้าของความจริง — ประวัติที่ server ถือไว้และ snapshot เป็นระยะ เพื่อให้อุปกรณ์ใหม่เอี่ยมตามทันได้โดยไม่ต้อง replay ทุก op ที่เคยมี
+
+**Where it plugs in:** Durable Object `OpLog` ที่คุณ deploy เพิ่ม `snapshot(seq)` ที่มันเสิร์ฟได้ และ prune ประวัติที่ต่ำกว่า `head` ที่ ack แล้ว (ครึ่ง server ของ compaction) มันยังเป็น relay — แค่ relay อย่างฉลาดขึ้น
+
+## A conflict-aware UI
+
+**What it teaches:** ว่า "conflict-free" แปลว่า *data* ลู่เข้าหากัน ไม่ใช่ว่าคนไม่เคยอยากเห็นว่าเกิดอะไรขึ้น การแก้ไขพร้อมกัน merge แบบ deterministic แต่บางครั้งผลลัพธ์ที่ merge แล้วก็สมควรมี marker บาง ๆ ไม่ใช่การเขียนทับเงียบ ๆ
+
+**Where it plugs in:** `<note-editor>` และ `<sync-status>` แสดงตอนที่ remote merge เปลี่ยน text ใต้มือ user, โชว์ sync state อย่างซื่อตรง (offline / pending / synced) และพิจารณา annotate บริเวณที่เพิ่ง merge นี่คือ UX layer ที่การรับประกันของ CRDT ปลดล็อกให้คุณ build ได้
+
+## Where to go from here
+
+คุณ build ทั้ง stack local-first ขึ้นจาก repo เปล่า: CRDT ใน Rust, ขอบเขต WASM, IndexedDB เป็น source of truth, Service Worker สำหรับออฟไลน์จริงและ Background Sync และ thin relay ที่ deploy ไป edge extension ทุกตัวด้านบนเริ่มจากรากฐานนั้น
+
+ถ้าเว้นไปนาน ลองอ่าน[architecture](/offlinenotes/th/introduction/architecture/) อีกครั้ง — มันอ่านต่างออกไปตอนนี้ที่คุณ build แต่ละชิ้นแล้ว และมันคือแผนที่สำหรับอะไรก็ตามที่คุณจะเพิ่มต่อ
+
+source เต็มอยู่บน GitHub: **[github.com/avetavos/realworld-offlinenotes](https://github.com/avetavos/realworld-offlinenotes)** fork มัน เลือก extension แล้วทำให้มันเป็นของคุณ

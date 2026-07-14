@@ -1,0 +1,58 @@
+---
+title: Next steps
+description: "Concrete extensions to OfflineNotes — each with what it teaches and exactly where it plugs into the app you built."
+sidebar:
+  order: 2
+---
+
+The simplifications named in the [recap](/offlinenotes/en/wrap-up/recap/) are a to-do list in disguise. Each item below is a real, self-contained extension: what it teaches, and where in the codebase it plugs in. Pick whichever gap you found most annoying while building — that's the one you'll learn the most from closing.
+
+## Op compaction and garbage collection
+
+**What it teaches:** How real CRDT systems stay bounded. Your RGA keeps a tombstone for every deletion and never drops an op, so a heavily-edited note's history grows forever. Compaction — snapshotting state and discarding history that every replica has already seen — is the hard, interesting part production CRDTs solve.
+
+**Where it plugs in:** The `docs` snapshot in IndexedDB and the `outbox`/op log. Add a "stable version" that all devices have acknowledged (the sync server already tracks a per-note `head`), then rewrite the snapshot without tombstones below it. This is the direct fix for the unbounded-growth caveat.
+
+## Adopt Automerge or Yjs
+
+**What it teaches:** What a production CRDT library gives you that a hand-rolled one doesn't — rich text with formatting, nested structure, efficient binary encodings, and years of correctness work. Swapping yours out is the best way to appreciate exactly which problems you were and weren't solving.
+
+**Where it plugs in:** Replace the `crates/crdt` engine and the `NoteDoc` wrapper. Keep the same store boundary — `apply local edit → op`, `merge(ops)`, `text()` — and most of the client, IndexedDB layout, and sync protocol survive the swap. That the app *tolerates* this change is itself the payoff of the thin-relay design.
+
+## End-to-end encryption of ops
+
+**What it teaches:** How local-first and zero-knowledge fit together. Because the server only relays opaque ops and never merges, it never needs to *read* them — so you can encrypt ops on the client before they ever leave the device.
+
+**Where it plugs in:** The push/pull seam. Encrypt each op with a per-note key (WebCrypto) as it leaves the `outbox`; decrypt on pull before `NoteDoc.merge`. The server stores ciphertext and is none the wiser. This leans directly on the server being deliberately dumb.
+
+## Presence and awareness
+
+**What it teaches:** The difference between *persistent* state (your CRDT, which must converge and survive) and *ephemeral* state (who's online, where their cursor is), which is disposable and doesn't belong in the op log.
+
+**Where it plugs in:** A separate, transient channel — a WebSocket on the sync Worker (a Durable Object is a natural coordinator) carrying awareness updates that are never written to IndexedDB. Render it in `<sync-status>` or as remote cursors in `<note-editor>`.
+
+## Real auth and shared multi-user docs
+
+**What it teaches:** Identity and authorization on top of sync — turning "anyone who knows the note id can append" into real ownership and sharing.
+
+**Where it plugs in:** The sync server's routes and the note id scheme. Put auth on `POST/GET /docs/:id/ops`, tie the `actor_id` to a real user identity, and add a sharing model (who may read/append which note). The client's `actorId` in `meta` becomes a genuine principal instead of a random device id.
+
+## Server-side history and snapshots with Durable Objects
+
+**What it teaches:** How to make the relay do a little more without making it own the truth — server-held history and periodic snapshots so a brand-new device can catch up without replaying every op ever.
+
+**Where it plugs in:** The `OpLog` Durable Object you deployed. Add a `snapshot(seq)` it can serve, and prune history below the acknowledged `head` (the server half of compaction). It stays a relay — it just relays smarter.
+
+## A conflict-aware UI
+
+**What it teaches:** That "conflict-free" means the *data* converges, not that a human never wants to see what happened. Concurrent edits merge deterministically, but sometimes the merged result deserves a subtle marker, not a silent overwrite.
+
+**Where it plugs in:** `<note-editor>` and `<sync-status>`. Surface when a remote merge changed the text under the user, show sync state honestly (offline / pending / synced), and consider annotating recently-merged regions. This is the UX layer the CRDT's guarantees free you up to build.
+
+## Where to go from here
+
+You've built the whole local-first stack from an empty repo: a CRDT in Rust, a WASM boundary, IndexedDB as the source of truth, a Service Worker for real offline and Background Sync, and a thin relay deployed to the edge. Every extension above starts from that foundation.
+
+If it's been a while, re-read the [architecture](/offlinenotes/en/introduction/architecture/) — it reads differently now that you've built each piece, and it's the map for anything you add next.
+
+The full source is on GitHub: **[github.com/avetavos/realworld-offlinenotes](https://github.com/avetavos/realworld-offlinenotes)**. Fork it, pick an extension, and make it yours.
