@@ -1,0 +1,163 @@
+---
+title: A Typed IndexedDB Store
+description: "wrap IndexedDB ด้วย library idb พร้อม typed schema แล้วเปิด database offlinenotes ที่ version 1"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+ใน [App Shell](/offlinenotes/th/app-shell/) เรา mount `<offline-notes-app>` และ child component ของมัน แต่มันไม่มีที่เก็บข้อมูล module นี้ให้ที่เก็บกับมัน OfflineNotes เป็น **local-first** — IndexedDB คือ source of truth ของ client ไม่ใช่ cache หน้า server — ดังนั้น storage layer จึงเป็นตัวรับน้ำหนัก และเราอยากให้มัน typed และน่าเบื่อ
+
+ในบทนี้เรา wrap IndexedDB ด้วย library [`idb`](https://github.com/jakearchibald/idb), อธิบาย database ของเราด้วย TypeScript schema และเปิด `offlinenotes` ที่ version 1 ผ่าน `db.ts` ที่ใช้ร่วมกันตัวเดียว เราสร้าง object store ตรงนี้; [next lesson](/offlinenotes/th/indexeddb/notes-object-stores/) จะสร้าง typed accessor ต่อยอดขึ้นไป
+
+IndexedDB ดิบ ๆ เป็น API แบบ event-driven, callback-based จากปี 2015 — `IDBRequest.onsuccess`, `onupgradeneeded`, transaction ที่ปิดตัวเองถ้าคุณ `await` ผิดจังหวะ `idb` เป็น promise wrapper บาง ๆ ครอบ API นั้นเป๊ะ ๆ (object เดียวกัน, semantic เดียวกัน) เราจึงเขียน `await db.get(...)` แทนการต่อสาย event handler และได้ compile-time check บนชื่อ store และรูปร่างของ value
+
+## Why
+
+- **IndexedDB ไม่ใช่ `localStorage`** `localStorage` เป็น synchronous, เก็บได้แค่ string และเพดานราว 5 MB note ที่มี body แบบ markdown บวก CRDT op log ที่โตขึ้นเรื่อย ๆ ต้องการ structured record, index และ transaction จริง IndexedDB เป็น browser store เดียวที่สร้างมาเพื่อสิ่งนั้น และมันคือฐานที่ทั้งแอปนั่งอยู่บน
+- **typed wrapper ไม่ใช่ request ดิบ ๆ** ส่วนของแอปที่แตะ storage — ตอนนี้คือ component ภายหลังคือ note store และ sync engine — ไม่ควรต่างคนต่าง re-derive วิธีเปิด transaction ให้ถูก `db.ts` ตัวเดียวเป็นเจ้าของ schema และ connection; ที่เหลือ import typed helper ไปใช้
+- **schema type คุ้มค่าทันที** การประกาศ store เป็น `DBSchema` หมายความว่า typo ในชื่อ store หรือรูปร่าง value ที่ผิดจะเป็นเส้นหยักแดง ไม่ใช่ runtime `DataError` ที่คุณเจอหลังจาก note save ไม่สำเร็จ
+
+## Pros & cons
+
+**`idb` เทียบกับ IndexedDB ดิบ ๆ**
+
+- **Pros:** promise แทน `onsuccess`/`onerror`; `async`/`await` อ่านเป็นธรรมชาติ; generic `DBSchema` type ให้ทุก `get`/`put`; ~1 KB gzipped; เป็น API เดียวกันข้างใต้ จึงไม่มีอะไรถูกซ่อนจากคุณ
+- **Cons:** มี dependency เพิ่มอีกตัว; คุณยังต้องเข้าใจ transaction lifetime ของ IndexedDB (transaction ปิดตัวเมื่อ microtask queue ว่างโดยไม่มี request ค้าง) เพราะ `idb` รักษามันไว้ตามจริงแทนที่จะแปะทับ
+
+**shared connection promise เทียบกับการเปิดต่อ call**
+
+- **Pros:** `openDB` รันครั้งเดียว; ทุก accessor `await` promise เดียวกัน จึงมี upgrade path เดียวและไม่มี connection churn; ผู้เรียกที่ concurrent ตอน startup ได้ connection ตัวเดียวกันหมด
+- **Cons:** singleton ระดับ module เป็น global state โดยปริยาย; ใน test คุณ reset มันด้วยการลบ database ระหว่าง case แทนการสร้าง instance ใหม่
+
+## Set it up
+
+### 1. `apps/web` — add the dependency
+
+```bash
+pnpm --filter web add idb
+```
+
+`idb` มาพร้อม TypeScript type ของตัวเอง จึงไม่มี `@types/idb` ให้ต้องเพิ่ม
+
+### 2. `apps/web/src/db.ts` — the schema and the connection
+
+อธิบาย store ทั้งสี่เป็น `DBSchema` แล้วเปิด database ครั้งเดียวและ cache promise ไว้ type ของ `key` และ `value` ของแต่ละ store ประกาศไว้ตรงนี้ และบังคับใช้ทุกที่ที่ใช้ connection
+
+```ts
+import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+
+// One serialized CRDT operation. The CRDT crate (Module 6) defines the
+// real shape; here it's opaque JSON — the store never inspects it.
+export type Op = unknown;
+
+// A full CRDT document snapshot, produced by NoteDoc.snapshot() (Module 7).
+export type SnapshotData = unknown;
+
+export interface OfflineNotesDB extends DBSchema {
+  // List projection for the note list UI: derived, cheap to read.
+  notes: {
+    key: string;
+    value: { id: string; title: string; updatedAt: number };
+  };
+  // Authoritative per-note CRDT snapshot.
+  docs: {
+    key: string;
+    value: { id: string; actorId: string; snapshot: SnapshotData };
+  };
+  // Local ops not yet pushed to the sync server. seq is auto-assigned.
+  outbox: {
+    key: number;
+    value: { seq: number; noteId: string; op: Op };
+  };
+  // Small key/value bag: actorId, and pulled:<noteId> sync watermarks.
+  meta: {
+    key: string;
+    value: { key: string; value: unknown };
+  };
+}
+
+const DB_NAME = 'offlinenotes';
+const DB_VERSION = 1;
+
+let dbPromise: Promise<IDBPDatabase<OfflineNotesDB>> | null = null;
+
+export function getDb(): Promise<IDBPDatabase<OfflineNotesDB>> {
+  if (!dbPromise) {
+    dbPromise = openDB<OfflineNotesDB>(DB_NAME, DB_VERSION, {
+      upgrade(db) {
+        // Runs once per version bump. Create the stores for v1.
+        db.createObjectStore('notes', { keyPath: 'id' });
+        db.createObjectStore('docs', { keyPath: 'id' });
+        db.createObjectStore('outbox', { keyPath: 'seq', autoIncrement: true });
+        db.createObjectStore('meta', { keyPath: 'key' });
+      },
+    });
+  }
+  return dbPromise;
+}
+```
+
+มีสองรายละเอียดที่ควรพูดถึง callback `upgrade` เป็น hook สำหรับ schema-migration **เดียว** ของ IndexedDB: มันรันเมื่อ browser ไม่มี database หรือมี version เก่ากว่า `DB_VERSION` และเป็นที่เดียวที่ `createObjectStore` ถูกกฎ พอเราต้องการ store ตัวที่ห้าหรือ index ภายหลัง เราจะ bump `DB_VERSION` เป็น 2 แล้ว branch ภายใน `upgrade` บน `oldVersion` — เลข version คือ cursor ของ migration ไม่ใช่ของประดับ
+
+store `outbox` ใช้ `autoIncrement: true` กับ `keyPath: 'seq'` ดังนั้น IndexedDB assign ค่า `seq` แล้วเขียนกลับลงใน record ที่เก็บ นั่นให้ทุก op ที่ queue ไว้มี local sequence number แบบ monotonic ฟรี ๆ ซึ่ง `enqueueOp`/`drainOutbox` ของ [next lesson](/offlinenotes/th/indexeddb/notes-object-stores/) พึ่งพา
+
+### 3. `apps/web/src/components/offline-notes-app.ts` — open on boot
+
+เตะ connection ให้เริ่มตอน root element mount เพื่อให้ upgrade แรกเกิดขึ้นก่อนที่ component ใดจะอ่าน ไม่มีอะไร block รอมัน; accessor ภายหลัง `await getDb()` แล้วเข้าร่วม promise เดียวกัน
+
+```ts
+import { getDb } from '../db';
+
+class OfflineNotesApp extends HTMLElement {
+  connectedCallback() {
+    // Fire-and-forget: opens (and upgrades) the DB once, early.
+    void getDb();
+    this.innerHTML = `<note-list></note-list><note-editor></note-editor>`;
+  }
+}
+
+customElements.define('offline-notes-app', OfflineNotesApp);
+```
+
+## Verify
+
+type-check และ build web app:
+
+```bash
+pnpm --filter web exec tsc --noEmit
+pnpm --filter web build
+```
+
+ทั้งคู่ควรจบโดยไม่มี error — schema type resolve ได้ และไม่มีอะไรอ้างถึง store ที่ไม่มีอยู่
+
+จากนั้นรัน dev server แล้ว inspect database ใน browser:
+
+```bash
+pnpm --filter web dev
+```
+
+เปิดแอปที่ `http://localhost:4321/offlinenotes/` แล้วไป DevTools → **Application** → **IndexedDB** → **offlinenotes** คุณควรเห็น version 1 พร้อม object store สี่ตัว — `notes`, `docs`, `outbox`, `meta` — ว่างทั้งหมด ใน **Console** ยืนยันว่า connection resolve:
+
+```js
+const { getDb } = await import('/src/db.ts');
+const db = await getDb();
+console.log(db.name, db.version, [...db.objectStoreNames]);
+// offlinenotes 1 ['docs', 'meta', 'notes', 'outbox']
+```
+
+`objectStoreNames` กลับมาแบบเรียงแล้ว ลำดับจึงต่างจากลำดับที่สร้าง — นั่นคือสิ่งที่คาดไว้
+
+**Check your understanding:**
+
+1. ทำไม `createObjectStore` ถึงทำงานได้เฉพาะภายใน callback `upgrade` และคุณจะเปลี่ยนอะไรเพื่อเพิ่ม store ภายหลังโดยไม่ทำ database ของ user เดิมพัง?
+2. `autoIncrement: true` กับ `keyPath: 'seq'` ทำอะไรกับ record ที่คุณเก็บใน `outbox` และทำไม monotonic sequence number ถึงมีประโยชน์กับ outbox โดยเฉพาะ?
+3. `getDb()` cache promise ไม่ใช่ connection ที่ resolve แล้ว ทำไมถึง cache promise และเกิดอะไรขึ้นถ้าสอง component เรียก `getDb()` ใน tick เดียวกัน?
+4. เราเลือก IndexedDB แทน `localStorage` บอกคุณสมบัติสองอย่างของข้อมูลที่ OfflineNotes เก็บ ซึ่ง `localStorage` รองรับไม่ได้
+
+## Recap
+
+เรา wrap IndexedDB ด้วย `idb`, อธิบาย `offlinenotes` เป็น typed `DBSchema` และเปิดมันที่ version 1 ผ่าน `db.ts` ที่ใช้ร่วมกันตัวเดียวซึ่งสร้าง store `notes`, `docs`, `outbox` และ `meta` connection เป็น cached promise ที่เปิดครั้งเดียวตอน boot และ callback `upgrade` คือรอยต่อ migration ของเราสำหรับ version ต่อ ๆ ไป
+
+store มีอยู่แล้วแต่ยังไม่มีอะไรรู้วิธีอ่านหรือเขียนมันอย่างปลอดภัย ต่อไป [Notes object stores →](/offlinenotes/th/indexeddb/notes-object-stores/) เดินผ่านรูปร่างของแต่ละ store แล้วเพิ่ม typed accessor — `getNote`, `putNote`, `listNotes` และตัวอื่น ๆ — ที่ Notes UI จะต่อยอด

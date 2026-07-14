@@ -1,0 +1,190 @@
+---
+title: Notes object stores
+description: "object store notes, docs, outbox และ meta พร้อม typed accessor — getNote, putNote, listNotes และตัวอื่น ๆ — ที่แอปอ่านและเขียนผ่าน"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+[previous lesson](/offlinenotes/th/indexeddb/a-typed-store/) เปิด `offlinenotes` และสร้าง object store เปล่าสี่ตัว บทนี้ให้แต่ละ store มีงานที่ชัดเจน แล้วเพิ่ม **typed accessor** ที่ส่วนที่เหลือของแอปเรียกใช้ — ไม่มี component หรือ note store ในอนาคตตัวไหนเปิด transaction เอง
+
+พอจบ `db.ts` export `getNote`, `putNote`, `listNotes`, `getDoc`, `putDoc`, `enqueueOp`, `drainOutbox`, `getMeta` และ `setMeta` module [Notes UI](/offlinenotes/th/notes-ui/) ใช้มันตรง ๆ; sync engine พึ่ง `enqueueOp`/`drainOutbox` ภายหลัง
+
+## Why
+
+- **สี่ store สี่ความรับผิดชอบ** local-first app มีมากกว่า "ข้อมูล": มันมีรูปแบบที่เชื่อถือได้, read model ราคาถูก, queue ขาออก และการจดบัญชีเล็กน้อย การแยกมันทำให้แต่ละการอ่านเร็วและแต่ละการเขียนชัดเจน
+- **accessor ไม่ใช่ `db.get` ดิบ ๆ กระจายอยู่ทั่ว** ถ้าทุก component เขียน transaction ของตัวเอง รูปร่าง value และกฎ "อัปเดต `notes` ทุกครั้งที่ `docs` เปลี่ยน" จะเพี้ยน module ตัวเดียวเป็นเจ้าของ invariant เหล่านั้น
+- **รูปร่างคือ contract** รูปร่าง record เหล่านี้เป๊ะ ๆ ใช้ร่วมกับ CRDT engine, sync server และบทเรียนภาษาไทย การตรึงมันตรงนี้คือสิ่งที่ทำให้ module ต่อ ๆ ไป assume ได้เลย ไม่ต้อง re-derive ว่า record `docs` มีอะไร
+
+แต่ละ store และเหตุผลที่มันมีอยู่:
+
+- **`notes`** — `{ id, title, updatedAt }` เป็น **list projection**: ขั้นต่ำที่ note list ต้องใช้ render หนึ่งแถว derive มาจากเอกสารจริง การอ่าน list ไม่เคย deserialize CRDT snapshot
+- **`docs`** — `{ id, actorId, snapshot }` เป็น state ที่ **เชื่อถือได้** ต่อ note: CRDT snapshot เต็มบวก `actorId` ของ replica ทุกอย่างที่เหลือ derive มาจากตัวนี้
+- **`outbox`** — `{ seq, noteId, op }` local op ที่ **ยังไม่ push** ไปยัง sync server key ด้วย `seq` ที่ assign อัตโนมัติ push drain มันตามลำดับ; ไม่มีอะไรตรงนี้ถูกลบจนกว่า server จะ acknowledge
+- **`meta`** — `{ key, value }` ถุง key/value เล็ก ๆ: `actorId` ของเครื่องนี้ และ watermark `pulled:<noteId>` ที่บันทึก server sequence ล่าสุดที่ pull มาต่อ note
+
+ก่อน CRDT (module นี้กับ[บทถัดไป](/offlinenotes/th/notes-ui/)) UI เขียน note ธรรมดาลง `notes` ตรง ๆ `docs` และ `outbox` ว่างจนกว่าจะถึง [Wiring the WASM Core](/offlinenotes/th/wiring-wasm/) — แต่เราสร้าง accessor ครบทั้งสี่กลุ่มตอนนี้ เพื่อให้ storage API เสถียรก่อนที่ CRDT จะมานั่งทับ
+
+## Pros & cons
+
+**list projection `notes` แยกต่างหาก เทียบกับการอ่าน `docs` เพื่อทำ list**
+
+- **Pros:** query ของ list ยังเล็กและไม่เคยแตะ CRDT snapshot; render N แถวอ่าน N record เล็ก ๆ; projection เพิ่ม sort index ได้โดยไม่รบกวน store ที่เชื่อถือได้
+- **Cons:** สอง store อธิบาย note เดียวกัน การเขียนจึงต้องอัปเดตทั้งคู่ และมันเพี้ยนได้ถ้า code path ไหนลืม เรากันเรื่องนั้นด้วยการบีบให้ทุก mutation ผ่าน `putNote`/`putDoc`
+
+**store `outbox` เทียบกับการคำนวณ op ที่ยังไม่ sync แบบ on the fly**
+
+- **Pros:** "อะไรยังต้อง push?" เป็น list ถาวรที่รอดจากการ reload และช่วง offline; Background Sync (Module 11) แค่ drain มัน; ลำดับชัดเจนผ่าน `seq`
+- **Cons:** มัน duplicate op ที่อยู่ใน snapshot ด้วยจนกว่ามันจะถูก acknowledge และ outbox หดลงเฉพาะตอน push สำเร็จ — outbox ของเครื่องที่ offline โตขึ้นจนกว่ามันจะ reconnect
+
+## Set it up
+
+### 1. `apps/web/src/db.ts` — typed accessors
+
+เพิ่มพวกนี้ต่อยอดจาก `getDb()` ของบทก่อน ทุก function `await` connection ที่ใช้ร่วมกัน มันจึงขี่ upgrade path เดียวกันหมด
+
+```ts
+import type { Op, SnapshotData } from './db';
+
+// --- notes: the list projection ---------------------------------------
+
+export type NoteMeta = OfflineNotesDB['notes']['value']; // { id, title, updatedAt }
+
+export async function getNote(id: string): Promise<NoteMeta | undefined> {
+  return (await getDb()).get('notes', id);
+}
+
+export async function putNote(note: NoteMeta): Promise<void> {
+  await (await getDb()).put('notes', note);
+}
+
+export async function listNotes(): Promise<NoteMeta[]> {
+  const all = await (await getDb()).getAll('notes');
+  // Most-recently edited first — the order the list UI wants.
+  return all.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function deleteNote(id: string): Promise<void> {
+  const db = await getDb();
+  // Remove the projection and the authoritative doc together.
+  const tx = db.transaction(['notes', 'docs'], 'readwrite');
+  await Promise.all([
+    tx.objectStore('notes').delete(id),
+    tx.objectStore('docs').delete(id),
+    tx.done,
+  ]);
+}
+
+// --- docs: the authoritative CRDT snapshot ----------------------------
+
+export type NoteDocRecord = OfflineNotesDB['docs']['value']; // { id, actorId, snapshot }
+
+export async function getDoc(id: string): Promise<NoteDocRecord | undefined> {
+  return (await getDb()).get('docs', id);
+}
+
+export async function putDoc(doc: NoteDocRecord): Promise<void> {
+  await (await getDb()).put('docs', doc);
+}
+
+// --- outbox: local ops awaiting push ----------------------------------
+
+export async function enqueueOp(noteId: string, op: Op): Promise<number> {
+  const db = await getDb();
+  // seq is auto-assigned; add() returns the new key. Cast: our value
+  // type names seq, but the store fills it in, so we omit it here.
+  return db.add('outbox', { noteId, op } as OfflineNotesDB['outbox']['value']);
+}
+
+export async function drainOutbox(): Promise<
+  OfflineNotesDB['outbox']['value'][]
+> {
+  const db = await getDb();
+  // Read everything queued, in seq order (the store's natural key order).
+  return db.getAll('outbox');
+}
+
+export async function ackOutbox(throughSeq: number): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction('outbox', 'readwrite');
+  // Delete acknowledged ops up to and including throughSeq.
+  for await (const cursor of tx.store) {
+    if (cursor.key <= throughSeq) await cursor.delete();
+  }
+  await tx.done;
+}
+
+// --- meta: small key/value bookkeeping --------------------------------
+
+export async function getMeta<T = unknown>(key: string): Promise<T | undefined> {
+  const rec = await (await getDb()).get('meta', key);
+  return rec?.value as T | undefined;
+}
+
+export async function setMeta(key: string, value: unknown): Promise<void> {
+  await (await getDb()).put('meta', { key, value });
+}
+```
+
+มีการตัดสินใจไม่กี่อย่างที่ควรพูดถึง `deleteNote` ครอบ `notes` และ `docs` ใน transaction `readwrite` **เดียว** ดังนั้น note จึงไม่มีทางรอดใน store หนึ่งหลังจากถูกลบจากอีก store — นั่นคือ invariant ที่ทำให้ projection ซื่อสัตย์ `enqueueOp` return `seq` ที่ถูก assign เพราะผู้เรียกต้องการ local sequence number ที่เพิ่งสร้าง และ `getMeta` เป็น generic เพื่อให้ `getMeta<string>('actorId')` และ watermark `pulled:<noteId>` แบบตัวเลขอ่านกลับมาโดย type ถูกต้อง เพราะ value ของ `meta` จงใจให้หลวม
+
+### 2. `apps/web/src/actor.ts` — a stable device id
+
+`actorId` ระบุ replica นี้ให้ CRDT (Module 6) และต้องเสถียรข้ามการ reload เก็บมันใน `meta` ตอนรันครั้งแรก
+
+```ts
+import { getMeta, setMeta } from './db';
+
+export async function getActorId(): Promise<string> {
+  let id = await getMeta<string>('actorId');
+  if (!id) {
+    id = crypto.randomUUID();
+    await setMeta('actorId', id);
+  }
+  return id;
+}
+```
+
+`crypto.randomUUID()` มีให้ใช้ในทุก browser ที่รองรับ stack ที่เหลือนี้ และ UUID มี entropy มากพอที่จะทำให้ actor id ของสองเครื่องแตกต่างกัน
+
+## Verify
+
+type-check accessor แล้ว build:
+
+```bash
+pnpm --filter web exec tsc --noEmit
+pnpm --filter web build
+```
+
+ทั้งคู่ควรผ่าน จากนั้นลองวิ่ง round-trip จาก browser console (dev server รันอยู่, แอปเปิดอยู่):
+
+```js
+const db = await import('/src/db.ts');
+
+await db.putNote({ id: 'n1', title: 'First note', updatedAt: Date.now() });
+await db.putNote({ id: 'n2', title: 'Second', updatedAt: Date.now() + 1 });
+console.log((await db.listNotes()).map((n) => n.title)); // ['Second', 'First note']
+
+const seq = await db.enqueueOp('n1', { t: 'title', value: 'First note' });
+console.log('queued seq', seq);          // 1
+console.log(await db.drainOutbox());     // [{ seq: 1, noteId: 'n1', op: {...} }]
+
+await db.deleteNote('n1');
+console.log(await db.getNote('n1'));     // undefined
+```
+
+`listNotes` return แบบใหม่สุดก่อน, `enqueueOp` ส่ง `seq` ที่ assign อัตโนมัติกลับมา และ `deleteNote` เคลียร์ note จากทั้งสอง store
+
+**Check your understanding:**
+
+1. ทำไม `notes` ถึงเก็บแค่ `{ id, title, updatedAt }` แทนที่จะเก็บ body เต็มของ note? มันให้อะไรกับ list UI?
+2. `deleteNote` ครอบสอง `delete` ไว้ใน transaction เดียว invariant อะไรจะพังถ้ามันทำเป็นสอง `await` แยกกัน?
+3. `enqueueOp` เก็บ `{ noteId, op }` แต่ value type ยังระบุ `seq` ด้วย `seq` มาจากไหน และทำไม function ถึง return มัน?
+4. `getMeta` เป็น generic (`getMeta<T>`) ทำไม value ของ store `meta` ถึง type แบบหลวม ๆ และ generic กู้อะไรคืนให้ผู้เรียก?
+
+## Recap
+
+เราให้แต่ละ store มีบทบาท — `notes` (list projection), `docs` (snapshot ที่เชื่อถือได้), `outbox` (op ที่ยังไม่ push), `meta` (การจดบัญชี) — แล้วสร้าง typed accessor ที่ทั้งแอปอ่านและเขียนผ่าน: `getNote`/`putNote`/`listNotes`/`deleteNote`, `getDoc`/`putDoc`, `enqueueOp`/`drainOutbox`/`ackOutbox`, `getMeta`/`setMeta` บวก `actorId` ที่เสถียร storage API เสถียรแล้ว พร้อมให้ CRDT มานั่งทับภายหลัง
+
+foundation เสร็จแล้ว ต่อไป [The Notes UI →](/offlinenotes/th/notes-ui/) วาง editor และ list จริงไว้หน้า store เหล่านี้ — สร้าง, แก้ไข และลบ note ที่ persist ลง `notes` ยังก่อน CRDT ด้วย field ชื่อและ body ธรรมดา

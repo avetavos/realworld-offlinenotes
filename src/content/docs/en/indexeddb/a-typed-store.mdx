@@ -1,0 +1,163 @@
+---
+title: A Typed IndexedDB Store
+description: "Wrap IndexedDB in the idb library with a typed schema and open the offlinenotes database at version 1."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+In [App Shell](/offlinenotes/en/app-shell/) we mounted `<offline-notes-app>` and its child components, but they had nowhere to keep data. This module gives them one. OfflineNotes is **local-first** — IndexedDB is the client's source of truth, not a cache in front of a server — so the storage layer is load-bearing, and we want it typed and boring.
+
+In this lesson we wrap IndexedDB in the [`idb`](https://github.com/jakearchibald/idb) library, describe our database with a TypeScript schema, and open `offlinenotes` at version 1 through a single shared `db.ts`. We create the object stores here; the [next lesson](/offlinenotes/en/indexeddb/notes-object-stores/) builds the typed accessors on top.
+
+Raw IndexedDB is an event-driven, callback-based API from 2015 — `IDBRequest.onsuccess`, `onupgradeneeded`, transactions that auto-close if you `await` the wrong thing. `idb` is a tiny promise wrapper over exactly that API (same objects, same semantics) so we write `await db.get(...)` instead of wiring event handlers, and we get compile-time checks on store names and value shapes.
+
+## Why
+
+- **IndexedDB, not `localStorage`.** `localStorage` is synchronous, string-only, and caps out around 5 MB. Notes with markdown bodies plus a growing CRDT op log need structured records, indexes, and real transactions. IndexedDB is the only browser store built for that, and it's the substrate the whole app sits on.
+- **A typed wrapper, not raw requests.** The parts of the app that touch storage — components now, the note store and sync engine later — should not each re-derive how to open a transaction correctly. One `db.ts` owns the schema and the connection; everyone else imports typed helpers.
+- **A schema type earns its keep immediately.** Declaring the stores as a `DBSchema` means a typo in a store name or the wrong value shape is a red squiggle, not a runtime `DataError` you discover after a note fails to save.
+
+## Pros & cons
+
+**`idb` vs. raw IndexedDB**
+
+- **Pros:** Promises instead of `onsuccess`/`onerror`; `async`/`await` reads naturally; a `DBSchema` generic types every `get`/`put`; ~1 KB gzipped; it's the same API underneath, so nothing is hidden from you.
+- **Cons:** One more dependency; you still must understand IndexedDB's transaction lifetime (a transaction closes once the microtask queue empties without a pending request), because `idb` faithfully preserves it rather than papering over it.
+
+**A shared connection promise vs. opening per call**
+
+- **Pros:** `openDB` runs once; every accessor `await`s the same promise, so there's a single upgrade path and no connection churn; concurrent callers on startup all get the one connection.
+- **Cons:** A module-level singleton is implicit global state; in tests you reset it by deleting the database between cases rather than by constructing a fresh instance.
+
+## Set it up
+
+### 1. `apps/web` — add the dependency
+
+```bash
+pnpm --filter web add idb
+```
+
+`idb` ships its own TypeScript types, so there's no `@types/idb` to add.
+
+### 2. `apps/web/src/db.ts` — the schema and the connection
+
+Describe the four stores as a `DBSchema`, then open the database once and cache the promise. Each store's `key` and `value` types are declared here and enforced everywhere the connection is used.
+
+```ts
+import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+
+// One serialized CRDT operation. The CRDT crate (Module 6) defines the
+// real shape; here it's opaque JSON — the store never inspects it.
+export type Op = unknown;
+
+// A full CRDT document snapshot, produced by NoteDoc.snapshot() (Module 7).
+export type SnapshotData = unknown;
+
+export interface OfflineNotesDB extends DBSchema {
+  // List projection for the note list UI: derived, cheap to read.
+  notes: {
+    key: string;
+    value: { id: string; title: string; updatedAt: number };
+  };
+  // Authoritative per-note CRDT snapshot.
+  docs: {
+    key: string;
+    value: { id: string; actorId: string; snapshot: SnapshotData };
+  };
+  // Local ops not yet pushed to the sync server. seq is auto-assigned.
+  outbox: {
+    key: number;
+    value: { seq: number; noteId: string; op: Op };
+  };
+  // Small key/value bag: actorId, and pulled:<noteId> sync watermarks.
+  meta: {
+    key: string;
+    value: { key: string; value: unknown };
+  };
+}
+
+const DB_NAME = 'offlinenotes';
+const DB_VERSION = 1;
+
+let dbPromise: Promise<IDBPDatabase<OfflineNotesDB>> | null = null;
+
+export function getDb(): Promise<IDBPDatabase<OfflineNotesDB>> {
+  if (!dbPromise) {
+    dbPromise = openDB<OfflineNotesDB>(DB_NAME, DB_VERSION, {
+      upgrade(db) {
+        // Runs once per version bump. Create the stores for v1.
+        db.createObjectStore('notes', { keyPath: 'id' });
+        db.createObjectStore('docs', { keyPath: 'id' });
+        db.createObjectStore('outbox', { keyPath: 'seq', autoIncrement: true });
+        db.createObjectStore('meta', { keyPath: 'key' });
+      },
+    });
+  }
+  return dbPromise;
+}
+```
+
+Two details worth naming. The `upgrade` callback is IndexedDB's **only** schema-migration hook: it runs when the browser has no database or an older version than `DB_VERSION`, and it's the one place `createObjectStore` is legal. When we need a fifth store or an index later, we bump `DB_VERSION` to 2 and branch inside `upgrade` on `oldVersion` — the version number is the migration cursor, not decoration.
+
+The `outbox` store uses `autoIncrement: true` with `keyPath: 'seq'`, so IndexedDB assigns the `seq` and writes it back into the stored record. That gives every queued op a monotonic local sequence number for free, which the [next lesson's](/offlinenotes/en/indexeddb/notes-object-stores/) `enqueueOp`/`drainOutbox` rely on.
+
+### 3. `apps/web/src/components/offline-notes-app.ts` — open on boot
+
+Kick the connection off when the root element mounts, so the first upgrade happens before any component reads. Nothing blocks on it; later accessors `await getDb()` and join the same promise.
+
+```ts
+import { getDb } from '../db';
+
+class OfflineNotesApp extends HTMLElement {
+  connectedCallback() {
+    // Fire-and-forget: opens (and upgrades) the DB once, early.
+    void getDb();
+    this.innerHTML = `<note-list></note-list><note-editor></note-editor>`;
+  }
+}
+
+customElements.define('offline-notes-app', OfflineNotesApp);
+```
+
+## Verify
+
+Type-check and build the web app:
+
+```bash
+pnpm --filter web exec tsc --noEmit
+pnpm --filter web build
+```
+
+Both should complete with no errors — the schema types resolve and nothing references a store that doesn't exist.
+
+Then run the dev server and inspect the database in the browser:
+
+```bash
+pnpm --filter web dev
+```
+
+Open the app at `http://localhost:4321/offlinenotes/`, then DevTools → **Application** → **IndexedDB** → **offlinenotes**. You should see version 1 with four object stores — `notes`, `docs`, `outbox`, `meta` — all empty. In the **Console**, confirm the connection resolves:
+
+```js
+const { getDb } = await import('/src/db.ts');
+const db = await getDb();
+console.log(db.name, db.version, [...db.objectStoreNames]);
+// offlinenotes 1 ['docs', 'meta', 'notes', 'outbox']
+```
+
+`objectStoreNames` comes back sorted, so the order differs from creation order — that's expected.
+
+**Check your understanding:**
+
+1. Why does `createObjectStore` only work inside the `upgrade` callback, and what would you change to add a store later without breaking existing users' databases?
+2. What does `autoIncrement: true` with `keyPath: 'seq'` do to a record you store in `outbox`, and why is a monotonic sequence number useful for the outbox specifically?
+3. `getDb()` caches a promise rather than a resolved connection. Why cache the promise, and what happens if two components call `getDb()` on the same tick?
+4. We chose IndexedDB over `localStorage`. Name two properties of the data OfflineNotes stores that `localStorage` could not serve.
+
+## Recap
+
+We wrapped IndexedDB in `idb`, described `offlinenotes` as a typed `DBSchema`, and opened it at version 1 through a single shared `db.ts` that creates the `notes`, `docs`, `outbox`, and `meta` stores. The connection is a cached promise opened once on boot, and the `upgrade` callback is our migration seam for later versions.
+
+The stores exist but nothing yet knows how to read or write them safely. Next, [Notes object stores →](/offlinenotes/en/indexeddb/notes-object-stores/) walks through each store's shape and adds the typed accessors — `getNote`, `putNote`, `listNotes`, and the rest — that the Notes UI will build on.
