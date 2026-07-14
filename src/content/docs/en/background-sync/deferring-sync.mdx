@@ -1,0 +1,128 @@
+---
+title: Deferring sync while offline
+description: "Register the sync-notes Background Sync tag when a push is needed while offline, so the browser retries the moment connectivity returns."
+sidebar:
+  order: 1
+---
+
+In [Push & Pull Sync](/offlinenotes/en/push-pull/) the client drains its `outbox` the instant an edit lands — but only if there's a network. Offline, the push fails, the ops stay queued, and *something* has to remember to try again later. So far that "something" is the user reopening the app. This lesson hands that job to the browser.
+
+The **Background Sync API** lets a page register a named intent — "I have work that needs the network" — and walk away. The browser holds the request and fires a `sync` event in your Service Worker **when connectivity returns**, even if the tab is long closed. We register one tag, `sync-notes`, whenever a push is deferred because we're offline.
+
+## What we're building
+
+A tiny client helper, `requestSync()`, that asks the browser to schedule a background sync under the tag `sync-notes`, plus the one line in the store's write path that calls it when a push can't happen now. The Service Worker side — actually draining the `outbox` — is the [next lesson](/offlinenotes/en/background-sync/retry-when-online/). Here we only *arm* the retry.
+
+## Why
+
+An offline edit already persisted safely to IndexedDB through the [WASM CRDT](/offlinenotes/en/crdt-rust/); the note is not at risk. What's missing is delivery: the queued ops need to reach the server eventually. Polling wastes battery and still misses the "you're back online" moment by up to the poll interval. Background Sync inverts it — the browser already knows the exact instant the radio comes back, so let it wake us then. Registering the tag is cheap and idempotent: ask as often as you like; the browser coalesces duplicate tags into one pending sync.
+
+## Pros & cons
+
+**Background Sync tag vs. pushing on every edit**
+
+- **Pros:** The browser owns the retry — it fires once connectivity is real, survives the tab closing, and backs off automatically on repeated failure. No timers, no reconnect logic in your app.
+- **Cons:** It's Chromium-only today (no Firefox, no Safari), so it must be treated as an enhancement with a fallback, never the sole path. That fallback is the next lesson.
+
+**Registering on demand vs. always registering**
+
+- **Pros:** Registering only when a push is actually deferred keeps the intent meaningful — a pending `sync-notes` tag means "there are unsent ops," nothing more.
+- **Cons:** You must feature-detect and guard every call, because `registration.sync` is absent on unsupported browsers and throws if the worker isn't active yet.
+
+## Set it up
+
+### 1. `apps/web/src/background-sync.ts`
+
+Feature-detect, then register the tag. Everything is guarded so a call on Safari is a harmless no-op — the caller falls through to the fallback we build next.
+
+```ts
+// apps/web/src/background-sync.ts
+
+// The single Background Sync tag OfflineNotes uses.
+export const SYNC_TAG = 'sync-notes';
+
+// True only where one-off Background Sync actually exists.
+export function hasBackgroundSync(): boolean {
+  return 'serviceWorker' in navigator && 'SyncManager' in window;
+}
+
+// Arm a background sync. Safe to call repeatedly — the browser
+// coalesces duplicate tags into a single pending sync.
+export async function requestSync(): Promise<boolean> {
+  if (!hasBackgroundSync()) return false;
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    await registration.sync.register(SYNC_TAG);
+    return true;
+  } catch (err) {
+    // register() throws InvalidStateError if the worker isn't active yet,
+    // or NotAllowedError if the user disabled background sync.
+    console.warn('[sync] Background Sync registration failed', err);
+    return false;
+  }
+}
+```
+
+### 2. `apps/web/src/store.ts`
+
+The store already calls `enqueueOp` after every local edit (Module 10). Add the fork: push now if we're online, otherwise defer to Background Sync. Leaving the ops in the `outbox` is exactly right — they're the retry payload.
+
+```ts
+// apps/web/src/store.ts (inside the edit path, after enqueueOp)
+import { pushOutbox } from './sync';           // Module 10
+import { requestSync } from './background-sync';
+
+async function afterLocalEdit(noteId: string, op: unknown): Promise<void> {
+  await enqueueOp(noteId, op);                  // durable first — Module 3
+
+  if (navigator.onLine) {
+    await pushOutbox();                          // deliver immediately
+  } else {
+    await requestSync();                         // defer: retry when back online
+  }
+}
+```
+
+Note the ordering: `enqueueOp` runs *before* either delivery attempt. The op is durable in IndexedDB no matter what the network does next — deferring sync never risks the edit, only its delivery.
+
+## Verify
+
+Start the app and the sync server:
+
+```bash
+pnpm --filter sync dev      # http://localhost:8787
+pnpm --filter web dev       # http://localhost:4321
+```
+
+Then, in the browser, confirm the tag is registered while offline:
+
+1. Open DevTools → **Application** → **Service Workers**; confirm the worker is activated.
+2. Open **Application** → **Background services** → **Background Sync** and click **Record**.
+3. In the **Network** panel, switch throttling to **Offline**.
+4. Edit a note. The push can't complete, so `requestSync()` runs.
+
+Expected: a `sync-notes` registration appears in the Background Sync recorder, logged as *"Registered sync"*:
+
+```text
+Background Sync
+  sync-notes    Registered sync    (waiting for connectivity)
+```
+
+Flip **Network** back to **Online** and the same panel logs the dispatch — that's the next lesson's `sync` event firing. Finally, confirm the build is clean:
+
+```bash
+pnpm --filter web build
+```
+
+Expected: `Complete!` with no type errors from `background-sync.ts`.
+
+Check your understanding:
+
+1. Why does `enqueueOp` run *before* the online/offline fork, rather than only on the offline branch?
+2. What does `requestSync()` return on Safari, and which code path is expected to take over there?
+3. Background Sync coalesces duplicate tags. Why is that a feature and not a bug for our edit-heavy write path?
+4. `registration.sync.register()` can throw. Name one condition under which it does, and explain why swallowing it (returning `false`) is the right call here.
+
+## Recap
+
+A deferred push is now a registered intent, not a lost edit. When the device is offline, the store enqueues the op to the durable `outbox` and asks the browser to fire `sync-notes` once the network is back. We armed the retry; nothing drains the queue yet. Next, [Retry when online →](/offlinenotes/en/background-sync/retry-when-online/) handles the `sync` event in the Service Worker and adds the fallback for browsers without Background Sync.

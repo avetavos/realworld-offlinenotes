@@ -1,0 +1,174 @@
+---
+title: Retry when online
+description: "Handle the Service Worker sync event to drain the outbox by POSTing to the server, with an online/focus fallback for browsers without Background Sync."
+sidebar:
+  order: 2
+---
+
+The [previous lesson](/offlinenotes/en/background-sync/deferring-sync/) registered the `sync-notes` tag while offline. Now we answer the browser when it fires. When connectivity returns, the browser dispatches a **`sync` event** in the Service Worker — even with every tab closed — and that handler drains the `outbox` by POSTing to the sync server. If the push fails, we reject, and the browser retries on its own schedule.
+
+Because Background Sync is Chromium-only, we also wire the honest fallback for Firefox and Safari: retry on the `online` event and when the tab becomes visible again. Same drain, different trigger.
+
+## What we're building
+
+Two things. First, the `sync` handler in `sw.js` and a self-contained `drainOutbox()` that reads the `outbox` and posts each note's ops to `POST /docs/:id/ops`. Second, a client-side fallback that runs the same push logic on `online` / `visibilitychange` for browsers that lack Background Sync.
+
+## Why
+
+The Service Worker is the right place to drain the queue precisely because it outlives the page. A user who edits three notes on the train, closes the tab, and surfaces at a station gets those ops delivered without ever reopening the app — the worker wakes, drains, and sleeps. The design also leans on one guarantee: **`event.waitUntil()` keeps the worker alive until the promise settles, and a rejection tells the browser to retry the sync later with backoff.** So "the server is still unreachable" needs no code of ours — we simply throw, and the platform reschedules. The fallback exists because that platform guarantee doesn't exist everywhere; where it's missing, a page-level listener is the most we can honestly offer.
+
+## Pros & cons
+
+**Service Worker `sync` event vs. a page-level retry loop**
+
+- **Pros:** Runs with no tab open, wakes exactly when the network returns, and gets free exponential backoff on failure. The retry policy is the browser's problem, not ours.
+- **Cons:** The worker can't import the bundled `idb` wrapper, so the drain re-implements just enough raw IndexedDB. And the worker may be killed if `waitUntil` runs too long — large queues must stay chunked.
+
+**`online`/visibility fallback vs. requiring Background Sync**
+
+- **Pros:** Works in every browser today, including Safari and Firefox, so no user is stranded with an undeliverable queue.
+- **Cons:** It only fires while a tab is alive — close the app offline and nothing retries until you reopen it. It's a safety net, not a replacement.
+
+## Set it up
+
+### 1. `apps/web/public/sw.js`
+
+Add the `sync` listener and a self-contained drain. `sw.js` is hand-rolled (no Workbox) and copied verbatim, so it can't import the app's TypeScript — we open IndexedDB with the raw API and reuse the same `outbox` shape from Module 3: `{ seq, noteId, op }`.
+
+```js
+// apps/web/public/sw.js (additions)
+
+// Deploy: replace with your sync server URL (Module 13).
+const SYNC_URL = 'http://localhost:8787';
+
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'sync-notes') {
+    // Reject inside drainOutbox() => the browser retries this sync later.
+    event.waitUntil(drainOutbox());
+  }
+});
+
+async function drainOutbox() {
+  const db = await openNotesDb();
+  const entries = await idbGetAll(db, 'outbox');
+  if (entries.length === 0) return;
+
+  // One push per note: batch that note's queued ops together.
+  const byNote = new Map();
+  for (const entry of entries) {
+    const group = byNote.get(entry.noteId) ?? [];
+    group.push(entry);
+    byNote.set(entry.noteId, group);
+  }
+
+  for (const [noteId, group] of byNote) {
+    const res = await fetch(`${SYNC_URL}/docs/${noteId}/ops`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ops: group.map((e) => e.op) }),
+    });
+    // Throw on failure so waitUntil's promise rejects and the sync is retried.
+    if (!res.ok) throw new Error(`push failed for ${noteId}: ${res.status}`);
+    // Success: drop exactly the ops we delivered, keyed by seq.
+    await idbDelete(db, 'outbox', group.map((e) => e.seq));
+  }
+}
+
+// --- Minimal raw-IndexedDB helpers (the SW can't use the idb wrapper) ---
+
+function openNotesDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('offlinenotes', 1); // app already created the stores
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbGetAll(db, store) {
+  return new Promise((resolve, reject) => {
+    const req = db.transaction(store, 'readonly').objectStore(store).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbDelete(db, store, keys) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    const os = tx.objectStore(store);
+    for (const key of keys) os.delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+```
+
+Deleting only the drained `seq`s matters: an edit made *during* the push stays queued and rides the next sync. We never clear the whole store blind.
+
+### 2. `apps/web/src/background-sync.ts`
+
+Add the fallback for browsers without Background Sync. It reuses `pushOutbox` from Module 10 — the very same delivery logic, just triggered from the page instead of the worker.
+
+```ts
+// apps/web/src/background-sync.ts (additions)
+import { pushOutbox } from './sync';           // Module 10
+// hasBackgroundSync() is defined earlier in this same file (previous lesson).
+
+// Where native Background Sync is missing, retry from the page on the two
+// signals we do get: the network returning, and the tab becoming visible.
+export function installOnlineFallback(): void {
+  if (hasBackgroundSync()) return;             // the SW sync event covers us
+
+  const retry = () => {
+    if (navigator.onLine) void pushOutbox();
+  };
+
+  window.addEventListener('online', retry);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') retry();
+  });
+}
+```
+
+Call `installOnlineFallback()` once from the app entry, right after you register the Service Worker.
+
+## Verify
+
+With both servers running (`pnpm --filter sync dev`, `pnpm --filter web dev`), test the Chromium path first:
+
+1. DevTools → **Application** → **Background services** → **Background Sync**, click **Record**.
+2. **Network** → **Offline**. Edit a note — `sync-notes` registers (previous lesson).
+3. **Network** → **Online**. The recorder logs the dispatch and your `sync` handler runs.
+
+Expected: the outbox drains and the server's head advances for that note:
+
+```bash
+curl "http://localhost:8787/docs/<noteId>/ops?since=0"
+# { "ops": [ { "seq": 1, "op": { "t": "ins", ... } } ], "head": 1 }
+```
+
+Confirm the queue is empty afterward — in the DevTools console:
+
+```js
+await (await indexedDB.open('offlinenotes', 1)).result
+// or inspect Application → IndexedDB → offlinenotes → outbox  (0 records)
+```
+
+Then test the fallback path: in Firefox or Safari (no Background Sync), edit offline, toggle the OS network back on, and watch `installOnlineFallback` fire `pushOutbox` on the `online` event — the same `curl` shows `head` advancing. Finally:
+
+```bash
+pnpm --filter web build
+```
+
+Expected: `Complete!`, and the built `sw.js` is emitted to `dist/` unchanged.
+
+Check your understanding:
+
+1. Why does throwing inside `drainOutbox()` produce the retry behavior we want, and what role does `event.waitUntil()` play in that?
+2. The drain deletes ops by `seq` per note rather than clearing the whole `outbox`. What bug does that prevent when an edit arrives mid-push?
+3. Why can't `sw.js` simply import the `idb` wrapper the rest of the app uses?
+4. The fallback listens on `online` and `visibilitychange`. What failure mode does it *not* cover that native Background Sync does?
+
+## Recap
+
+Sync now happens without you. The Service Worker's `sync` event drains the `outbox` when the network returns and lets the browser retry on failure; where Background Sync is unavailable, an `online`/visibility fallback runs the same push from the page. Delivery is finally as resilient as the local writes have been all along. Next, put the whole CRDT promise to the test in [Conflict-free Merge →](/offlinenotes/en/merge-practice/): two devices editing one note offline, converging without a conflict prompt.

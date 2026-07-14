@@ -1,0 +1,128 @@
+---
+title: Deferring sync while offline
+description: "Register Background Sync tag ชื่อ sync-notes เมื่อจำเป็นต้อง push ตอน offline เพื่อให้ browser retry ทันทีที่ connectivity กลับมา"
+sidebar:
+  order: 1
+---
+
+ใน [Push & Pull Sync](/offlinenotes/th/push-pull/) client drain `outbox` ของมันทันทีที่ edit ลงมา — แต่เฉพาะเมื่อมี network ตอน offline การ push ล้มเหลว op ค้างอยู่ใน queue และ *อะไรสักอย่าง* ต้องจำไว้ว่าจะลองใหม่ทีหลัง จนถึงตอนนี้ "อะไรสักอย่าง" นั้นคือ user เปิด app ขึ้นมาใหม่ บทนี้ยกงานนั้นให้ browser
+
+**Background Sync API** ให้ page register ความตั้งใจที่มีชื่อได้ — "ฉันมีงานที่ต้องใช้ network" — แล้วเดินจากไป browser ถือ request นั้นไว้แล้ว fire `sync` event ใน Service Worker ของคุณ **เมื่อ connectivity กลับมา** ต่อให้ปิด tab ไปนานแล้วก็ตาม เรา register tag เดียวชื่อ `sync-notes` ทุกครั้งที่ push ถูกเลื่อนเพราะเรา offline
+
+## What we're building
+
+client helper เล็ก ๆ ชื่อ `requestSync()` ที่ขอให้ browser schedule background sync ภายใต้ tag `sync-notes` บวกกับหนึ่งบรรทัดใน write path ของ store ที่เรียกมันเมื่อ push ตอนนี้ทำไม่ได้ ส่วนฝั่ง Service Worker — ที่ drain `outbox` จริง ๆ — คือ[บทถัดไป](/offlinenotes/th/background-sync/retry-when-online/) ตรงนี้เราแค่ *ตั้ง* การ retry ไว้
+
+## Why
+
+edit ที่ทำ offline persist ลง IndexedDB อย่างปลอดภัยแล้วผ่าน [WASM CRDT](/offlinenotes/th/crdt-rust/); note ไม่ได้เสี่ยงอะไร สิ่งที่ขาดคือการส่งมอบ: op ที่ค้างใน queue ต้องไปถึง server ในที่สุด การ poll เปลือง battery และก็ยังพลาดจังหวะ "คุณกลับมา online แล้ว" ได้ถึงหนึ่งช่วง poll interval Background Sync พลิกมัน — browser รู้อยู่แล้วว่าวินาทีไหนที่ radio กลับมาพอดี ก็ให้มันปลุกเราตอนนั้น การ register tag นั้นถูกและ idempotent: ขอบ่อยแค่ไหนก็ได้; browser รวม tag ซ้ำ ๆ ให้เป็น pending sync เดียว
+
+## Pros & cons
+
+**Background Sync tag vs. pushing on every edit**
+
+- **Pros:** browser เป็นเจ้าของการ retry — มัน fire เมื่อ connectivity มีจริง อยู่รอดแม้ปิด tab และ back off เองอัตโนมัติเมื่อล้มเหลวซ้ำ ๆ ไม่มี timer ไม่มี logic reconnect ใน app คุณ
+- **Cons:** ตอนนี้มันมีแค่บน Chromium (ไม่มีใน Firefox ไม่มีใน Safari) จึงต้องมองมันเป็น enhancement ที่มี fallback ไม่ใช่ path เดียว fallback นั้นคือบทถัดไป
+
+**Registering on demand vs. always registering**
+
+- **Pros:** register เฉพาะตอนที่ push ถูกเลื่อนจริง ทำให้ความตั้งใจนั้นมีความหมาย — tag `sync-notes` ที่ค้างอยู่แปลว่า "มี op ที่ยังไม่ได้ส่ง" ไม่มากไปกว่านั้น
+- **Cons:** คุณต้อง feature-detect และ guard ทุกการเรียก เพราะ `registration.sync` ไม่มีบน browser ที่ไม่รองรับ และ throw ถ้า worker ยังไม่ active
+
+## Set it up
+
+### 1. `apps/web/src/background-sync.ts`
+
+feature-detect แล้ว register tag ทุกอย่างถูก guard ไว้ เพื่อให้การเรียกบน Safari เป็น no-op ที่ไม่มีผลอะไร — ผู้เรียกจะตกไปที่ fallback ที่เราสร้างบทถัดไป
+
+```ts
+// apps/web/src/background-sync.ts
+
+// The single Background Sync tag OfflineNotes uses.
+export const SYNC_TAG = 'sync-notes';
+
+// True only where one-off Background Sync actually exists.
+export function hasBackgroundSync(): boolean {
+  return 'serviceWorker' in navigator && 'SyncManager' in window;
+}
+
+// Arm a background sync. Safe to call repeatedly — the browser
+// coalesces duplicate tags into a single pending sync.
+export async function requestSync(): Promise<boolean> {
+  if (!hasBackgroundSync()) return false;
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    await registration.sync.register(SYNC_TAG);
+    return true;
+  } catch (err) {
+    // register() throws InvalidStateError if the worker isn't active yet,
+    // or NotAllowedError if the user disabled background sync.
+    console.warn('[sync] Background Sync registration failed', err);
+    return false;
+  }
+}
+```
+
+### 2. `apps/web/src/store.ts`
+
+store เรียก `enqueueOp` หลังทุก local edit อยู่แล้ว (Module 10) เพิ่มทางแยก: push ตอนนี้ถ้าเรา online ไม่งั้นเลื่อนไปให้ Background Sync การทิ้ง op ไว้ใน `outbox` ถูกต้องพอดี — มันคือ payload ของการ retry
+
+```ts
+// apps/web/src/store.ts (inside the edit path, after enqueueOp)
+import { pushOutbox } from './sync';           // Module 10
+import { requestSync } from './background-sync';
+
+async function afterLocalEdit(noteId: string, op: unknown): Promise<void> {
+  await enqueueOp(noteId, op);                  // durable first — Module 3
+
+  if (navigator.onLine) {
+    await pushOutbox();                          // deliver immediately
+  } else {
+    await requestSync();                         // defer: retry when back online
+  }
+}
+```
+
+สังเกตลำดับ: `enqueueOp` รัน *ก่อน* ความพยายามส่งมอบทั้งสองแบบ op คงทนอยู่ใน IndexedDB ไม่ว่า network จะทำอะไรต่อ — การเลื่อน sync ไม่เคยเสี่ยงต่อ edit เสี่ยงแค่การส่งมอบมันเท่านั้น
+
+## Verify
+
+เริ่ม app และ sync server:
+
+```bash
+pnpm --filter sync dev      # http://localhost:8787
+pnpm --filter web dev       # http://localhost:4321
+```
+
+จากนั้นใน browser ยืนยันว่า tag ถูก register ขณะ offline:
+
+1. เปิด DevTools → **Application** → **Service Workers**; ยืนยันว่า worker activated แล้ว
+2. เปิด **Application** → **Background services** → **Background Sync** แล้วคลิก **Record**
+3. ใน panel **Network** สลับ throttling ไปเป็น **Offline**
+4. แก้ note สักอัน push ทำไม่สำเร็จ `requestSync()` จึงรัน
+
+ที่ควรได้: การ register `sync-notes` โผล่ใน Background Sync recorder log ไว้ว่า *"Registered sync"*:
+
+```text
+Background Sync
+  sync-notes    Registered sync    (waiting for connectivity)
+```
+
+สลับ **Network** กลับเป็น **Online** แล้ว panel เดียวกัน log การ dispatch — นั่นคือ `sync` event ของบทถัดไปที่ fire สุดท้าย ยืนยันว่า build สะอาด:
+
+```bash
+pnpm --filter web build
+```
+
+ที่ควรได้: `Complete!` โดยไม่มี type error จาก `background-sync.ts`
+
+ตรวจสอบความเข้าใจ:
+
+1. ทำไม `enqueueOp` รัน *ก่อน* ทางแยก online/offline แทนที่จะรันเฉพาะบน branch offline?
+2. `requestSync()` return อะไรบน Safari และคาดว่า code path ไหนจะเข้ามารับช่วงต่อตรงนั้น?
+3. Background Sync รวม tag ซ้ำเข้าด้วยกัน ทำไมนั่นเป็น feature ไม่ใช่ bug สำหรับ write path ที่ edit เยอะของเรา?
+4. `registration.sync.register()` throw ได้ ยกหนึ่งเงื่อนไขที่มัน throw และอธิบายว่าทำไมการกลืนมันไว้ (return `false`) จึงเป็นทางเลือกที่ถูกตรงนี้
+
+## Recap
+
+push ที่ถูกเลื่อนตอนนี้เป็นความตั้งใจที่ register ไว้ ไม่ใช่ edit ที่หายไป เมื่อ device offline store enqueue op ลง `outbox` ที่คงทน แล้วขอให้ browser fire `sync-notes` เมื่อ network กลับมา เราตั้งการ retry ไว้แล้ว แต่ยังไม่มีอะไร drain queue ต่อไป [Retry when online →](/offlinenotes/th/background-sync/retry-when-online/) จัดการ `sync` event ใน Service Worker และเพิ่ม fallback สำหรับ browser ที่ไม่มี Background Sync

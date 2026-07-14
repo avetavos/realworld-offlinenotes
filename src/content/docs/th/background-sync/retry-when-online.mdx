@@ -1,0 +1,174 @@
+---
+title: Retry when online
+description: "Handle Service Worker sync event เพื่อ drain outbox ด้วยการ POST ไป server พร้อม fallback แบบ online/focus สำหรับ browser ที่ไม่มี Background Sync"
+sidebar:
+  order: 2
+---
+
+[บทที่แล้ว](/offlinenotes/th/background-sync/deferring-sync/) register tag `sync-notes` ขณะ offline ตอนนี้เราตอบ browser เมื่อมัน fire เมื่อ connectivity กลับมา browser dispatch **`sync` event** ใน Service Worker — แม้ปิดทุก tab แล้ว — และ handler นั้น drain `outbox` ด้วยการ POST ไป sync server ถ้า push ล้มเหลว เรา reject แล้ว browser retry เองตามตารางของมัน
+
+เพราะ Background Sync มีแค่บน Chromium เราจึงต่อสาย fallback ตรง ๆ สำหรับ Firefox และ Safari ด้วย: retry บน `online` event และเมื่อ tab กลับมา visible อีกครั้ง drain เดียวกัน trigger ต่างกัน
+
+## What we're building
+
+สองอย่าง อย่างแรก handler `sync` ใน `sw.js` และ `drainOutbox()` ที่ self-contained ซึ่งอ่าน `outbox` แล้ว post op ของแต่ละ note ไป `POST /docs/:id/ops` อย่างที่สอง fallback ฝั่ง client ที่รัน push logic เดียวกันบน `online` / `visibilitychange` สำหรับ browser ที่ไม่มี Background Sync
+
+## Why
+
+Service Worker คือที่ที่ถูกต้องสำหรับ drain queue พอดีเพราะมันอยู่นานกว่า page user ที่แก้สาม note บนรถไฟ ปิด tab แล้วโผล่มาที่สถานี ได้ op พวกนั้นถูกส่งมอบโดยไม่ต้องเปิด app ขึ้นมาใหม่เลย — worker ตื่น, drain, แล้วหลับ ดีไซน์นี้ยังพึ่งการรับประกันหนึ่งข้อ: **`event.waitUntil()` ทำให้ worker มีชีวิตอยู่จน promise settle และการ reject บอก browser ให้ retry sync ทีหลังพร้อม backoff** ดังนั้น "server ยังเข้าไม่ถึง" ไม่ต้องมี code ของเราเลย — เราแค่ throw แล้ว platform reschedule ให้ fallback มีอยู่เพราะการรับประกันของ platform นั้นไม่ได้มีอยู่ทุกที่ ที่ไหนที่มันขาด page-level listener คือสิ่งมากสุดที่เราเสนอได้อย่างซื่อตรง
+
+## Pros & cons
+
+**Service Worker `sync` event vs. a page-level retry loop**
+
+- **Pros:** รันโดยไม่ต้องมี tab เปิด, ตื่นพอดีตอน network กลับมา, และได้ exponential backoff ฟรีเมื่อล้มเหลว retry policy เป็นปัญหาของ browser ไม่ใช่ของเรา
+- **Cons:** worker import `idb` wrapper ที่ bundle ไว้ไม่ได้ การ drain จึงต้อง re-implement raw IndexedDB เท่าที่จำเป็น และ worker อาจถูก kill ถ้า `waitUntil` รันนานเกินไป — queue ใหญ่ ๆ ต้องอยู่เป็น chunk
+
+**`online`/visibility fallback vs. requiring Background Sync**
+
+- **Pros:** ทำงานในทุก browser วันนี้ รวมถึง Safari และ Firefox ไม่มี user คนไหนติดค้างกับ queue ที่ส่งมอบไม่ได้
+- **Cons:** มัน fire เฉพาะตอนมี tab มีชีวิต — ปิด app ตอน offline แล้วไม่มีอะไร retry จนคุณเปิดมันใหม่ มันเป็นตาข่ายกันตก ไม่ใช่ตัวแทน
+
+## Set it up
+
+### 1. `apps/web/public/sw.js`
+
+เพิ่ม listener `sync` และ drain ที่ self-contained `sw.js` เขียนมือ (ไม่มี Workbox) และถูก copy แบบ verbatim มันจึง import TypeScript ของ app ไม่ได้ — เราเปิด IndexedDB ด้วย raw API แล้วใช้ shape `outbox` เดียวกันจาก Module 3 ซ้ำ: `{ seq, noteId, op }`
+
+```js
+// apps/web/public/sw.js (additions)
+
+// Deploy: replace with your sync server URL (Module 13).
+const SYNC_URL = 'http://localhost:8787';
+
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'sync-notes') {
+    // Reject inside drainOutbox() => the browser retries this sync later.
+    event.waitUntil(drainOutbox());
+  }
+});
+
+async function drainOutbox() {
+  const db = await openNotesDb();
+  const entries = await idbGetAll(db, 'outbox');
+  if (entries.length === 0) return;
+
+  // One push per note: batch that note's queued ops together.
+  const byNote = new Map();
+  for (const entry of entries) {
+    const group = byNote.get(entry.noteId) ?? [];
+    group.push(entry);
+    byNote.set(entry.noteId, group);
+  }
+
+  for (const [noteId, group] of byNote) {
+    const res = await fetch(`${SYNC_URL}/docs/${noteId}/ops`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ops: group.map((e) => e.op) }),
+    });
+    // Throw on failure so waitUntil's promise rejects and the sync is retried.
+    if (!res.ok) throw new Error(`push failed for ${noteId}: ${res.status}`);
+    // Success: drop exactly the ops we delivered, keyed by seq.
+    await idbDelete(db, 'outbox', group.map((e) => e.seq));
+  }
+}
+
+// --- Minimal raw-IndexedDB helpers (the SW can't use the idb wrapper) ---
+
+function openNotesDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('offlinenotes', 1); // app already created the stores
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbGetAll(db, store) {
+  return new Promise((resolve, reject) => {
+    const req = db.transaction(store, 'readonly').objectStore(store).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbDelete(db, store, keys) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    const os = tx.objectStore(store);
+    for (const key of keys) os.delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+```
+
+การลบเฉพาะ `seq` ที่ drain แล้วสำคัญ: edit ที่ทำ *ระหว่าง* push ยังค้างอยู่ใน queue แล้วขี่ sync ครั้งถัดไป เราไม่เคยล้างทั้ง store แบบตาบอด
+
+### 2. `apps/web/src/background-sync.ts`
+
+เพิ่ม fallback สำหรับ browser ที่ไม่มี Background Sync มันใช้ `pushOutbox` จาก Module 10 ซ้ำ — delivery logic ตัวเดียวกันเป๊ะ แค่ trigger จาก page แทนที่จะจาก worker
+
+```ts
+// apps/web/src/background-sync.ts (additions)
+import { pushOutbox } from './sync';           // Module 10
+// hasBackgroundSync() is defined earlier in this same file (previous lesson).
+
+// Where native Background Sync is missing, retry from the page on the two
+// signals we do get: the network returning, and the tab becoming visible.
+export function installOnlineFallback(): void {
+  if (hasBackgroundSync()) return;             // the SW sync event covers us
+
+  const retry = () => {
+    if (navigator.onLine) void pushOutbox();
+  };
+
+  window.addEventListener('online', retry);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') retry();
+  });
+}
+```
+
+เรียก `installOnlineFallback()` หนึ่งครั้งจาก entry ของ app ทันทีหลัง register Service Worker
+
+## Verify
+
+โดยให้ server ทั้งสองรันอยู่ (`pnpm --filter sync dev`, `pnpm --filter web dev`) ทดสอบ path ของ Chromium ก่อน:
+
+1. DevTools → **Application** → **Background services** → **Background Sync** คลิก **Record**
+2. **Network** → **Offline** แก้ note สักอัน — `sync-notes` register (บทที่แล้ว)
+3. **Network** → **Online** recorder log การ dispatch แล้ว handler `sync` ของคุณรัน
+
+ที่ควรได้: outbox drain แล้ว head ของ server advance สำหรับ note นั้น:
+
+```bash
+curl "http://localhost:8787/docs/<noteId>/ops?since=0"
+# { "ops": [ { "seq": 1, "op": { "t": "ins", ... } } ], "head": 1 }
+```
+
+ยืนยันว่า queue ว่างหลังจากนั้น — ใน DevTools console:
+
+```js
+await (await indexedDB.open('offlinenotes', 1)).result
+// or inspect Application → IndexedDB → offlinenotes → outbox  (0 records)
+```
+
+จากนั้นทดสอบ path fallback: ใน Firefox หรือ Safari (ไม่มี Background Sync) แก้ตอน offline, สลับ network ของ OS กลับมา, แล้วดู `installOnlineFallback` fire `pushOutbox` บน `online` event — `curl` เดียวกันแสดง `head` advance สุดท้าย:
+
+```bash
+pnpm --filter web build
+```
+
+ที่ควรได้: `Complete!` และ `sw.js` ที่ build แล้วถูก emit ไป `dist/` แบบไม่เปลี่ยน
+
+ตรวจสอบความเข้าใจ:
+
+1. ทำไมการ throw ภายใน `drainOutbox()` จึงให้พฤติกรรม retry ที่เราต้องการ และ `event.waitUntil()` มีบทบาทอะไรในนั้น?
+2. การ drain ลบ op ตาม `seq` ต่อ note แทนที่จะล้างทั้ง `outbox` มันป้องกัน bug อะไรเมื่อ edit มาถึงกลาง push?
+3. ทำไม `sw.js` ถึง import `idb` wrapper ที่ส่วนที่เหลือของ app ใช้ตรง ๆ ไม่ได้?
+4. fallback ฟังบน `online` และ `visibilitychange` มันไม่ครอบคลุม failure mode แบบไหนที่ native Background Sync ครอบคลุม?
+
+## Recap
+
+sync ตอนนี้เกิดขึ้นโดยไม่ต้องมีคุณ `sync` event ของ Service Worker drain `outbox` เมื่อ network กลับมา แล้วปล่อยให้ browser retry เมื่อล้มเหลว ที่ไหนที่ Background Sync ไม่มี fallback แบบ `online`/visibility รัน push เดียวกันจาก page การส่งมอบในที่สุดก็ทนทานเท่ากับการเขียนในเครื่องที่ทนทานมาตลอด ต่อไป เอา CRDT promise ทั้งหมดมาทดสอบใน [Conflict-free Merge →](/offlinenotes/th/merge-practice/): สอง device แก้ note เดียวกันตอน offline converge โดยไม่มี conflict prompt
