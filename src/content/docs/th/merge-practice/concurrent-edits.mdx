@@ -1,0 +1,127 @@
+---
+title: Concurrent edits, fully offline
+description: "ขับสอง client ที่มี actorId ต่างกันให้แก้ note เดียวกันตอน offline ทั้งคู่ แล้วตรวจแต่ละ outbox เพื่อดู op ที่แยกทางกัน"
+sidebar:
+  order: 1
+---
+
+ทุกบทที่ผ่านมา *อ้าง* ว่า CRDT merge edit ที่เกิดพร้อมกันได้โดยไม่มี conflict module นี้พิสูจน์มัน เราจัดสถานการณ์ที่ทำ notes app แบบไร้เดียงสาพังพอดี — สอง device แก้ note เดียวกัน ที่จุดเดียวกัน โดยไม่มี network คั่นกลาง — แล้วดูมันคลี่คลายอย่างสะอาด
+
+บทแรกนี้สร้างการแยกทาง: สอง client ที่เป็นอิสระ แต่ละตัวมี `actorId` ของตัวเอง แก้ note ที่ใช้ร่วมกันหนึ่งอันตอน offline เต็มตัว เราหยุดก่อนที่พวกมันจะ sync แล้วดูว่าแต่ละตัว queue อะไรไว้ใน `outbox` [บทถัดไป](/offlinenotes/th/merge-practice/convergence/) ปล่อยให้พวกมัน sync แล้วโชว์ว่ามันตกลงกันได้
+
+## What we're building
+
+ไม่มี app code ใหม่ — นี่คือ lab ลงมือทำกับ app ที่คุณสร้างไว้แล้ว สอง client ที่แยกกัน (สอง browser profile), note ที่ใช้ร่วมกัน, edit ที่ทำ offline พร้อมกัน, และ console snippet เพื่ออ่านแต่ละ `outbox` แล้วเห็นว่า op ถือ actor id ต่างกัน ความต่างนั้นคือเหตุผลทั้งหมดที่พวกมันจะไม่มีวันชนกัน
+
+## Why
+
+failure ที่เราหลีกเลี่ยงมองไม่เห็นใน tab เดียว เพราะ tab เดียวมี `actorId` เดียวและ op stream เดียว — ไม่มีอะไรให้ conflict conflict จริง ๆ ต้องการ **สอง replica ที่ต่างก็ mutate note เดียวกันโดยไม่เห็นกัน** สอง browser profile ให้เราแบบนั้นพอดี: origin สำหรับ IndexedDB แยกกัน แต่ละตัวจึงสร้างและเก็บ `actorId` ของตัวเองใน store `meta` และแต่ละตัวถือ `outbox` ของตัวเอง การแก้ที่ character index *เดียวกัน* ในทั้งสองตัว — เคสคลาสสิก "เราพิมพ์ที่ cursor พร้อมกัน" — คือสิ่งที่ store แบบ last-write-wins ทำเสียแบบเงียบ ๆ ตรงนี้ ทุกการกดคีย์กลายเป็น RGA op ที่มี element id เป็น `(counter, actorId)` สอง actor ต่างกันไม่มีทาง mint id เดียวกันได้ insert ของพวกมันจึง interleave แบบ deterministic แทนที่จะทับกัน การเห็น actor id ที่ต่างกันในสอง outbox *ก่อน* พวกมัน merge คือวินาทีที่การรับประกันเลิกเป็นแค่คำอ้าง
+
+## Pros & cons
+
+**Two OS/browser profiles vs. two tabs in one profile**
+
+- **Pros:** profile แยกกันหมายถึง IndexedDB แยก, `meta.actorId` แยก, `outbox` แยก — replica ที่เป็นอิสระจริง ซึ่งเป็นวิธีเดียวที่ซื่อตรงในการ reproduce conflict
+- **Cons:** setup มากกว่าเปิด tab ที่สอง และคุณต้องจำว่า window ไหนคือ client ตัวไหน tab ในหนึ่ง profile *แชร์* DB และ `actorId` เดียวกัน จึงแยกทางกันไม่ได้ — ใช้มันจะเป็นการโกงการทดสอบ
+
+**Editing the same note vs. different notes**
+
+- **Pros:** note เดียวกัน index เดียวกันคือเคสยาก — เป็นที่ที่ conflict อยู่จริง จึงเป็นการทดสอบเดียวที่คุ้มค่ารัน
+- **Cons:** เผลอสร้างสอง note *ต่างกัน* (id ต่างกัน) แล้วไม่พิสูจน์อะไรเลยได้ง่าย ต้องตั้ง `noteId` ที่ใช้ร่วมกันก่อน ซึ่งคือขั้นตอนเพิ่มด้านล่าง
+
+## Set it up
+
+### 1. Two isolated clients
+
+เปิด app ในสอง browser profile ที่แยกกัน (Chrome: **New profile**; หรือ window ปกติหนึ่งอันกับอีกอันจาก browser อื่น) เรียกมันว่า **Client A** กับ **Client B** แต่ละ profile มี IndexedDB ของตัวเอง แต่ละตัวจึง mint actor id ของตัวเองตอนโหลดครั้งแรก:
+
+```ts
+// apps/web/src/store.ts (already built, Module 3/7) — shown for reference
+async function ensureActorId(): Promise<string> {
+  let actorId = await getMeta('actorId');
+  if (!actorId) {
+    actorId = crypto.randomUUID();
+    await setMeta('actorId', actorId);         // one per replica, forever
+  }
+  return actorId;
+}
+```
+
+ยืนยันว่ามันต่างกัน — รันในแต่ละ console ของ profile:
+
+```js
+(await (await indexedDB.open('offlinenotes', 1)).result
+  .transaction('meta').objectStore('meta').get('actorId')).value
+// Client A: "3f1c...a2"   Client B: "9b74...e1"   (must NOT match)
+```
+
+### 2. Share one note between them
+
+สอง client ต้องแก้ `noteId` *เดียวกัน* สร้าง note บน **Client A** ตอน online, ปล่อยให้มัน push, แล้วบน **Client B** pull มันมา เพื่อให้ทั้งคู่ถือ doc และ snapshot เดียวกัน:
+
+1. Client A (online): สร้าง note พิมพ์ `Meeting notes:` มัน sync ผ่าน Module 10
+2. Client B (online): เปิด app เพื่อให้มัน pull; note เดียวกันโผล่มาพร้อม `id` เดียวกัน
+3. ยืนยันว่าทั้งคู่แสดง `noteId` เดียวกัน (Application → IndexedDB → `notes`)
+
+### 3. Go offline and edit concurrently
+
+ตอนนี้คือการทดสอบจริง ใน **ทั้งสอง** profile ไป DevTools → **Network** → **Offline** จากนั้นโดยไม่ sync:
+
+- **Client A** วาง cursor หลัง `Meeting notes:` แล้วพิมพ์ ` alpha` (insert ของ actor A)
+- **Client B** วาง cursor ที่จุด *เดียวกัน* แล้วพิมพ์ ` beta` (insert ของ actor B)
+
+แต่ละ edit รันในเครื่องผ่าน [WASM CRDT](/offlinenotes/th/crdt-rust/), persist, และ — เพราะ push เข้าถึง server ไม่ได้ — นั่งอยู่ใน `outbox` ของ client นั้น โดยมี tag `sync-notes` ตั้งไว้จาก [Deferring sync](/offlinenotes/th/background-sync/deferring-sync/)
+
+## Verify
+
+ตรวจแต่ละ `outbox` โดยไม่ drain มัน (อ่านเฉย ๆ ไม่ใช่ `drainOutbox`) รันในแต่ละ console ของ profile:
+
+```js
+const db = (await indexedDB.open('offlinenotes', 1)).result;
+const rows = await new Promise((res, rej) => {
+  const r = db.transaction('outbox').objectStore('outbox').getAll();
+  r.onsuccess = () => res(r.result);
+  r.onerror = () => rej(r.error);
+});
+console.table(rows.map((e) => ({
+  seq: e.seq,
+  noteId: e.noteId,
+  t: e.op.t,
+  ch: e.op.ch,
+  actor: (e.op.id ?? e.op.ts)?.[1],   // the actorId inside the op's element id
+})));
+```
+
+ที่ควรได้ — `noteId` เดียวกันบนทั้งคู่ แต่ทุก op ประทับด้วย actor ของ client ตัวเอง:
+
+```text
+Client A                                Client B
+seq  noteId  t    ch  actor             seq  noteId  t    ch  actor
+1    n_7c..  ins  " " 3f1c...a2          1    n_7c..  ins  " " 9b74...e1
+2    n_7c..  ins  "a" 3f1c...a2          2    n_7c..  ins  "b" 9b74...e1
+...                                      ...
+```
+
+`noteId` ตรงกัน; `actor` ไม่เคยตรง ไม่มีอะไร sync — ยืนยันว่า server ไม่ถูกแตะ:
+
+```bash
+curl "http://localhost:8787/docs/<noteId>/ops?since=0"
+# { "ops": [ ...only Client A's original "Meeting notes:" ops... ], "head": N }
+```
+
+edit ใหม่สองอันมีอยู่ *เฉพาะ* ใน outbox ของแต่ละตัวเท่านั้น เช็คสุดท้าย app ยังรันสะอาด:
+
+```bash
+pnpm --filter web build     # Complete!
+```
+
+ตรวจสอบความเข้าใจ:
+
+1. ทำไมสอง tab ใน profile *เดียวกัน* จึง reproduce conflict จริงไม่ได้ ขณะที่สอง profile ทำได้?
+2. อะไรอยู่ใน element id ของ op และทำไมนั่นทำให้ Client A กับ Client B mint id เดียวกันไม่ได้?
+3. ทั้งสอง client แก้ที่ character index เดียวกัน ใน store แบบ last-write-wins ข้อความของ client ตัวหนึ่งจะเกิดอะไรขึ้น — และทำไมมันไม่เกิดตรงนี้?
+4. ทำไมต้องสร้างและ sync note ที่ใช้ร่วมกัน *ก่อน* client ไป offline แทนที่จะให้แต่ละตัวสร้าง "note เดียวกัน" แยกกันเอง?
+
+## Recap
+
+เราปั้นเคสยากขึ้นมาตั้งใจ: หนึ่ง note, สอง replica ที่มี `actorId` ต่างกัน, edit พร้อมกันที่จุดเดียวกัน, offline ทั้งคู่ ตอนนี้ `outbox` ของแต่ละ client ถือ op ของตัวเอง ประทับด้วย actor ของตัวเอง และ server ยังไม่เห็นชุดไหนเลย การแยกทางเป็นจริงและมองเห็นได้ ต่อไป [Convergence →](/offlinenotes/th/merge-practice/convergence/) ปล่อยให้ทั้งคู่ sync แล้วโชว์ว่ามันตกลงกันบนข้อความเดียวกัน — และว่าลำดับกับการซ้ำของ op ไม่เปลี่ยนผลลัพธ์

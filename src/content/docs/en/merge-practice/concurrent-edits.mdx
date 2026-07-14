@@ -1,0 +1,127 @@
+---
+title: Concurrent edits, fully offline
+description: "Drive two clients with distinct actorIds to edit one note while both are offline, then inspect each outbox to see the divergent ops."
+sidebar:
+  order: 1
+---
+
+Every lesson so far has *claimed* the CRDT merges concurrent edits without conflict. This module proves it. We set up the exact situation that breaks a naive notes app — two devices editing the same note, at the same spot, with no network between them — and watch it resolve cleanly.
+
+This first lesson builds the divergence: two independent clients, each with its own `actorId`, editing one shared note fully offline. We stop just before they sync and look at what each has queued in its `outbox`. The [next lesson](/offlinenotes/en/merge-practice/convergence/) lets them sync and shows them agreeing.
+
+## What we're building
+
+No new app code — this is a hands-on lab against the app you've already built. Two isolated clients (two browser profiles), a shared note, concurrent offline edits, and a console snippet to read each `outbox` and see that the ops carry different actor ids. That difference is the whole reason they'll never collide.
+
+## Why
+
+The failure we're avoiding is invisible in a single tab, because one tab has one `actorId` and one op stream — nothing to conflict with. Real conflicts need **two replicas that both mutate the same note without seeing each other**. Two browser profiles give us exactly that: separate origins for IndexedDB, so each generates and stores its own `actorId` in the `meta` store, and each keeps its own `outbox`. Editing at the *same* character index in both — the classic "we both typed at the cursor" case — is what a last-write-wins store silently corrupts. Here, each keystroke becomes an RGA op whose element id is `(counter, actorId)`; two different actors can never mint the same id, so their inserts interleave deterministically instead of overwriting. Seeing the distinct actor ids in the two outboxes *before* they merge is the moment the guarantee stops being a claim.
+
+## Pros & cons
+
+**Two OS/browser profiles vs. two tabs in one profile**
+
+- **Pros:** Separate profiles mean separate IndexedDB, separate `meta.actorId`, separate `outbox` — genuinely independent replicas, which is the only honest way to reproduce a conflict.
+- **Cons:** More setup than opening a second tab, and you must keep track of which window is which client. Tabs in one profile *share* the same DB and `actorId`, so they can't diverge — using them would fake the test.
+
+**Editing the same note vs. different notes**
+
+- **Pros:** Same note, same index is the hard case — it's where conflicts actually live, so it's the only test worth running.
+- **Cons:** It's easy to accidentally create two *different* notes (different ids) and prove nothing. The shared `noteId` has to be established first, which is the extra step below.
+
+## Set it up
+
+### 1. Two isolated clients
+
+Open the app in two separate browser profiles (Chrome: **New profile**; or one normal window and one from a different browser). Call them **Client A** and **Client B**. Each profile has its own IndexedDB, so each mints its own actor id on first load:
+
+```ts
+// apps/web/src/store.ts (already built, Module 3/7) — shown for reference
+async function ensureActorId(): Promise<string> {
+  let actorId = await getMeta('actorId');
+  if (!actorId) {
+    actorId = crypto.randomUUID();
+    await setMeta('actorId', actorId);         // one per replica, forever
+  }
+  return actorId;
+}
+```
+
+Confirm they differ — run in each profile's console:
+
+```js
+(await (await indexedDB.open('offlinenotes', 1)).result
+  .transaction('meta').objectStore('meta').get('actorId')).value
+// Client A: "3f1c...a2"   Client B: "9b74...e1"   (must NOT match)
+```
+
+### 2. Share one note between them
+
+The two clients must edit the *same* `noteId`. Create the note on **Client A** while online, let it push, then on **Client B** pull it so both hold the same doc and snapshot:
+
+1. Client A (online): create a note, type `Meeting notes:`. It syncs via Module 10.
+2. Client B (online): open the app so it pulls; the same note appears with the same `id`.
+3. Confirm both show the same `noteId` (Application → IndexedDB → `notes`).
+
+### 3. Go offline and edit concurrently
+
+Now the actual test. In **both** profiles, DevTools → **Network** → **Offline**. Then, without syncing:
+
+- **Client A** puts the cursor after `Meeting notes:` and types ` alpha` (actor A's inserts).
+- **Client B** puts the cursor at the *same* spot and types ` beta` (actor B's inserts).
+
+Each edit runs locally through the [WASM CRDT](/offlinenotes/en/crdt-rust/), persists, and — because the push can't reach the server — sits in that client's `outbox`, with the `sync-notes` tag armed from [Deferring sync](/offlinenotes/en/background-sync/deferring-sync/).
+
+## Verify
+
+Inspect each `outbox` without draining it (a plain read, not `drainOutbox`). Run in each profile's console:
+
+```js
+const db = (await indexedDB.open('offlinenotes', 1)).result;
+const rows = await new Promise((res, rej) => {
+  const r = db.transaction('outbox').objectStore('outbox').getAll();
+  r.onsuccess = () => res(r.result);
+  r.onerror = () => rej(r.error);
+});
+console.table(rows.map((e) => ({
+  seq: e.seq,
+  noteId: e.noteId,
+  t: e.op.t,
+  ch: e.op.ch,
+  actor: (e.op.id ?? e.op.ts)?.[1],   // the actorId inside the op's element id
+})));
+```
+
+Expected — same `noteId` on both, but every op stamped with that client's own actor:
+
+```text
+Client A                                Client B
+seq  noteId  t    ch  actor             seq  noteId  t    ch  actor
+1    n_7c..  ins  " " 3f1c...a2          1    n_7c..  ins  " " 9b74...e1
+2    n_7c..  ins  "a" 3f1c...a2          2    n_7c..  ins  "b" 9b74...e1
+...                                      ...
+```
+
+The `noteId` matches; the `actor` never does. Nothing has synced — confirm the server is untouched:
+
+```bash
+curl "http://localhost:8787/docs/<noteId>/ops?since=0"
+# { "ops": [ ...only Client A's original "Meeting notes:" ops... ], "head": N }
+```
+
+The two new edits exist *only* in their respective outboxes. As a final check, the app still runs clean:
+
+```bash
+pnpm --filter web build     # Complete!
+```
+
+Check your understanding:
+
+1. Why do two tabs in the *same* profile fail to reproduce a real conflict, while two profiles succeed?
+2. What is inside an op's element id, and why does that make it impossible for Client A and Client B to mint the same id?
+3. Both clients edited at the same character index. In a last-write-wins store, what would happen to one client's text — and why doesn't it happen here?
+4. Why must the shared note be created and synced *before* the clients go offline, rather than each creating "the same" note independently?
+
+## Recap
+
+We manufactured the hard case on purpose: one note, two replicas with distinct `actorId`s, concurrent edits at the same spot, both offline. Each client's `outbox` now holds its own ops, stamped with its own actor, and the server has seen neither set. Divergence is real and visible. Next, [Convergence →](/offlinenotes/en/merge-practice/convergence/) lets both sync and shows them agreeing on identical text — and that the order and repetition of ops don't change the result.

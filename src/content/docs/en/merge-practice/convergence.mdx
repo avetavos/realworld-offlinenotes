@@ -1,0 +1,116 @@
+---
+title: Convergence
+description: "Sync both clients and watch them agree on identical text(), then prove op order and repeats don't change the result — the CRDT payoff, and its tombstone cost."
+sidebar:
+  order: 2
+---
+
+The [previous lesson](/offlinenotes/en/merge-practice/concurrent-edits/) left two clients divergent: one note, two `outbox`es, edits the server has never seen. Now we let them sync — and collect the payoff the whole architecture was built for. Both clients pull each other's ops, merge them through the [WASM CRDT](/offlinenotes/en/crdt-rust/), and land on **byte-for-byte identical text**, with no "which version do you want?" prompt anywhere.
+
+Then we prove *why* it's safe, not just that it worked this once: the merge is **commutative** (order doesn't matter) and **idempotent** (repeats don't matter). Those two properties are the entire guarantee. We close by naming the cost — tombstones — honestly.
+
+## What we're building
+
+Still a lab, no new app code. First, bring both clients online and confirm `text()` is identical. Then a small console experiment that merges the same ops in different orders and twice over, showing the result never changes. Finally, a look at the tombstones the deletes left behind.
+
+## Why
+
+"Eventually consistent" is easy to say and easy to fake — a single lucky sync proves nothing. What makes a CRDT trustworthy is that convergence is a *property of the data structure*, not of timing. Because merge is a **set-union of ops ordered deterministically**, it doesn't matter whether Client A's ops arrive before or after Client B's, or whether a flaky network delivers the same batch twice: every replica that has seen the same set of ops computes the same document. That's what lets the [thin server](/offlinenotes/en/push-pull/) stay dumb — it never merges, never resolves, just relays — and what lets Background Sync retry a push blindly without fear of double-applying. Demonstrating commutativity and idempotence by hand is how you earn the right to rely on all of that.
+
+## Pros & cons
+
+**CRDT merge vs. last-write-wins**
+
+- **Pros:** Both clients' edits survive and interleave; no edit is silently discarded, and no user is ever asked to pick a winner.
+- **Cons:** Convergence means *agreeing*, not *being right* — the merged order is deterministic but may not match either author's intent character-for-character. It resolves conflicts; it doesn't read minds.
+
+**Set-union of ops (commutative) vs. an ordered log you must replay in sequence**
+
+- **Pros:** Ops can arrive in any order, be retried, or be duplicated, and the result is identical — which is exactly what an unreliable network and a retrying `sync` event hand you.
+- **Cons:** Every op must carry enough identity (its `(counter, actorId)`) to be placed deterministically, and deletes must linger as tombstones so a late-arriving insert still knows where it belongs. That metadata grows.
+
+## Set it up
+
+### 1. Sync both clients
+
+Pick up the two offline clients from the previous lesson. In **each** profile, DevTools → **Network** → **Online**. Each client now pushes its `outbox` and pulls the other's ops (Module 10 / Background Sync), then merges:
+
+```ts
+// apps/web/src/sync.ts (already built, Module 10) — the merge step, for reference
+const { ops, head } = await pullSince(noteId, lastPulled);
+doc.merge(ops.map((e) => e.op));               // WASM CRDT applies remote ops
+await putDoc(noteId, doc.snapshot());
+await setMeta(`pulled:${noteId}`, head);
+```
+
+### 2. Compare `text()` on both
+
+In each profile's console, read the live document's text through the store's `NoteDoc`:
+
+```js
+// however your store exposes the open doc; e.g. window.__store.doc(noteId)
+__store.doc('<noteId>').text();
+```
+
+## Verify
+
+Both clients return the **same** string — the two concurrent edits interleaved deterministically:
+
+```text
+Client A:  "Meeting notes: alpha beta"
+Client B:  "Meeting notes: alpha beta"
+```
+
+They match exactly, and neither client was prompted to resolve anything. Now prove it wasn't luck — a self-contained experiment against the WASM engine, order and repetition varied on purpose:
+
+```js
+import init, { NoteDoc } from '../../crates/crdt/pkg/crdt.js';
+await init();
+
+// Capture both clients' op batches (from each outbox, previous lesson).
+const opsA = [ /* Client A's ins ops for " alpha" */ ];
+const opsB = [ /* Client B's ins ops for " beta"  */ ];
+const base = [ /* the shared "Meeting notes:" ops   */ ];
+
+// d1: base, then A, then B.
+const d1 = new NoteDoc('probe-1');
+d1.merge([...base, ...opsA, ...opsB]);
+
+// d2: the SAME ops, reversed order — commutativity.
+const d2 = new NoteDoc('probe-2');
+d2.merge([...base, ...opsB, ...opsA].reverse());
+
+// d1 again, applying everything a SECOND time — idempotence.
+d1.merge([...base, ...opsA, ...opsB]);
+
+console.log(d1.text() === d2.text());          // true  — order didn't matter
+console.log(d1.text());                         // unchanged by the repeat
+```
+
+Expected: `true`, and `d1.text()` is identical before and after the repeated merge. Reordering the ops changed nothing; applying them twice changed nothing. That is **commutative + idempotent** convergence, demonstrated rather than asserted.
+
+Confirm the queues are empty and the server holds the union:
+
+```bash
+curl "http://localhost:8787/docs/<noteId>/ops?since=0"
+# { "ops": [ ...base + A's ops + B's ops... ], "head": N }   # both outboxes now empty
+```
+
+**The tombstone caveat.** Delete some characters in either client and re-inspect the document's snapshot: the deleted elements don't vanish — they become **tombstones**, kept so a late insert that referenced them still resolves. Ops and tombstones only grow; this hand-rolled RGA has **no compaction**. That's the deliberate simplification from [A CRDT in Rust](/offlinenotes/en/crdt-rust/) — production engines like Automerge and Yjs garbage-collect this history; ours doesn't. Name it whenever you reach for a CRDT: convergence is paid for in metadata.
+
+Finally, the build stays clean:
+
+```bash
+pnpm --filter web build     # Complete!
+```
+
+Check your understanding:
+
+1. Both clients showed `"Meeting notes: alpha beta"`. What decided that A's text came before B's, given neither client saw the other while editing?
+2. The experiment merged the same ops twice and in reversed order, yet `text()` never changed. Which two CRDT properties does each of those tests exercise?
+3. Because merge is idempotent, what does that let the Background Sync `sync` event do safely that an ordered-log approach could not?
+4. A deleted character becomes a tombstone instead of disappearing. Why is keeping it necessary for correctness, and what long-term cost does that impose?
+
+## Recap
+
+The payoff, earned and demonstrated: two devices edited one note offline and converged on identical text with zero conflict prompts — and we proved convergence holds regardless of op order or repetition, the properties that let the server stay thin and sync stay retry-safe. The cost is tombstones that grow without compaction, a limit you can now name and defend. With the CRDT proven end to end, it's time to ship. Next: [Deployment →](/offlinenotes/en/deployment/) takes the PWA and the sync server to production.
