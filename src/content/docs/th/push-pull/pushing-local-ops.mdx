@@ -1,0 +1,137 @@
+---
+title: Pushing Local Ops
+description: "Drain IndexedDB outbox, POST op ของมันไป sync server, แล้ว advance ตาม head ที่ server ส่งกลับมา — ฝั่ง push ของ client"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+ฝั่ง push ของ client sync ทุก edit ที่ทำในเครื่องได้ทิ้ง op ไว้ใน store `outbox` ไปแล้วตั้งแต่ [Wiring the WASM Core →](/offlinenotes/th/wiring-wasm/) ตอนนี้เรา drain outbox นั้น จัดกลุ่ม op ตาม note, `POST` op ของแต่ละ note ไป `/docs/:id/ops`, แล้ว advance เมื่อ server ยืนยัน `head` ตัวใหม่
+
+นี่คือคู่ฝั่ง client ของ [Push & Pull Endpoints →](/offlinenotes/th/sync-server/push-and-pull-endpoints/) ที่เราเพิ่งสร้าง ส่วน pull — อ่าน remote op กลับมาแล้ว merge — คือ[บทถัดไป](/offlinenotes/th/push-pull/pulling-and-merging/)
+
+## Why
+
+outbox คือรอยต่อระหว่าง "แก้ในเครื่องแล้ว" กับ "server มีข้อมูลแล้ว" การเขียนไม่เคยรอ network: edit persist ลง IndexedDB แล้ว enqueue op เข้าไป และ *นั่นแหละ* คือ record ที่คงทน push เป็น pass แยกต่างหากที่ retry ได้ วนผ่าน outbox ซึ่งจะรันตอนนี้ อีกหนึ่งนาที หรือจากการปลุกโดย Background Sync ก็ได้ — edit ปลอดภัยอยู่แล้วไม่ว่าทางไหน
+
+การ decouple แบบนั้นคือเหตุผลที่ push จัดการ failure ได้แบบดิบ ๆ เรา drain outbox แล้วถ้า POST ล้มเหลว — offline หรือ server ล่ม — เราแค่ **ใส่ op กลับเข้าไป** สิ่งนี้ปลอดภัยพอดีเพราะ CRDT op เป็น **commutative และ idempotent**: ส่งซ้ำในลำดับต่างกัน หรือส่งซ้ำสองครั้ง ก็ทำให้ note ที่ merge แล้วเสียไม่ได้ ดีไซน์แบบ last-write-wins ไม่มีทาง re-enqueue แบบนี้ได้เลยโดยไม่เสี่ยงต่อ edit ที่หายหรือถูกทับ
+
+## Pros & cons
+
+**Drain-and-re-enqueue vs a per-op "sent" flag**
+
+- **Pros:** เรียบง่ายสุด ๆ — outbox เก็บ op ที่ยังไม่ push ไว้พอดี ไม่มีอะไรมากกว่านั้น ไม่มี state พิเศษให้คอย consistent และการจัดการ failure คือ `enqueueOp` เพียงครั้งเดียว
+- **Cons:** response ที่หายไป *หลังจาก* server append แล้ว หมายความว่าเราส่ง op พวกนั้นซ้ำ server จึงเก็บ duplicate ไว้ ไม่กระทบ convergence (merge เป็น idempotent) แต่มันเพิ่มขนาด log — ข้อควรระวังเรื่องการโตแบบไม่ compact ตัวเดียวกับที่ module CRDT เตือนไว้
+
+**Grouping ops by note vs one request per op**
+
+- **Pros:** หนึ่ง request ต่อ note ต่อ push การพิมพ์รัว ๆ จึงกลายเป็น POST เดียวแบบ batch round-trip น้อยลง overhead น้อยลง
+- **Cons:** session offline ยาว ๆ จะส่ง body ก้อนใหญ่หนึ่งก้อนต่อ note ตรงนี้โอเค แต่ production client จะแบ่ง batch ที่ใหญ่มากเป็น chunk
+
+## Set it up
+
+### 1. `apps/web/src/sync.ts`
+
+base URL มาจาก `PUBLIC_SYNC_URL` (Vite public env var) โดย default เป็น dev server ที่ port 8787 เราพึ่ง store accessor จาก module IndexedDB — `drainOutbox()` อ่านและล้าง outbox ใน transaction เดียว, `enqueueOp()` ใส่ op กลับตอนล้มเหลว
+
+```ts
+import { drainOutbox, enqueueOp } from './db';
+
+const SYNC_URL = import.meta.env.PUBLIC_SYNC_URL ?? 'http://localhost:8787';
+
+export async function push(): Promise<void> {
+  // Atomically read + empty the outbox: `pending` is now the un-pushed set.
+  const pending = await drainOutbox(); // { seq, noteId, op }[]
+  if (pending.length === 0) return;
+
+  // Batch ops per note — one POST per note.
+  const byNote = new Map<string, typeof pending>();
+  for (const entry of pending) {
+    const list = byNote.get(entry.noteId) ?? [];
+    list.push(entry);
+    byNote.set(entry.noteId, list);
+  }
+
+  for (const [noteId, entries] of byNote) {
+    const ops = entries.map((e) => e.op);
+    try {
+      const res = await fetch(`${SYNC_URL}/docs/${noteId}/ops`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ops }),
+      });
+      if (!res.ok) throw new Error(`push failed: ${res.status}`);
+
+      const { head } = (await res.json()) as { head: number };
+      console.debug(`pushed ${ops.length} op(s) for ${noteId}; server head ${head}`);
+    } catch (err) {
+      // Offline or server down: put them back. Safe because the CRDT merge
+      // is commutative + idempotent — order and repeats don't matter.
+      for (const entry of entries) await enqueueOp(entry.noteId, entry.op);
+      throw err;
+    }
+  }
+}
+```
+
+### 2. Trigger a push after edits
+
+เรียก `push()` แบบฉวยโอกาส — หลัง save และทุกครั้งที่ browser กลับมาต่อ network ได้ นี่คือ trigger ตรง ๆ ส่วน [Background Sync →](/offlinenotes/th/background-sync/) ทำให้มันอยู่รอดแม้ปิด app ไปแล้ว
+
+```ts
+import { push } from './sync';
+
+// after persisting an edit + enqueuing its op
+push().catch((err) => console.debug('push deferred:', err));
+
+// and when we come back online
+window.addEventListener('online', () => {
+  push().catch((err) => console.debug('push deferred:', err));
+});
+```
+
+`push()` ที่ล้มเหลวไม่ใช่ error ที่ต้องโชว์ให้ user เห็น — op กลับไปอยู่ใน outbox แล้ว และ trigger ถัดไปจะ retry มันเอง ส่วน `.catch` แค่กันไม่ให้มันกลายเป็น unhandled rejection
+
+## Verify
+
+เริ่มทั้งสองฝั่งจาก root ของ workspace:
+
+```bash
+pnpm --filter sync dev   # sync server on 8787
+pnpm --filter web dev    # Astro PWA on 4321
+```
+
+เปิด app ที่ `http://localhost:4321/offlinenotes/` แก้ note สักอัน แล้วใน DevTools console บังคับ push:
+
+```js
+await (await import('/src/sync.ts')).push();
+// console: pushed 3 op(s) for <noteId>; server head 3
+```
+
+ยืนยันว่า server รับมันแล้วด้วยการ pull note เดียวกัน (ใช้ id จากบรรทัด log):
+
+```bash
+curl -s 'http://localhost:8787/docs/<noteId>/ops?since=0'
+```
+
+ที่ควรได้ — op ที่คุณเพิ่งพิมพ์ แต่ละตัวมี `seq` และ `head` ตรงกับบรรทัดใน console:
+
+```json
+{"ops":[{"seq":1,"op":{"t":"title","value":"...","ts":[1,"..."]}}],"head":1}
+```
+
+ตอนนี้ทดสอบ path การ retry: หยุด sync server แก้ note อีกครั้ง แล้วเรียก `push()` มัน throw แต่ลองเช็ค IndexedDB → `outbox` ใน DevTools → Application อีกที — op **ยังอยู่ตรงนั้น** เริ่ม server ใหม่ เรียก `push()` อีกครั้ง แล้ว outbox ก็ว่าง round-trip นั้น — fail, re-enqueue, retry, drain — คือ run check ของบทนี้
+
+**Check your understanding:**
+
+1. ทำไมใส่ op กลับเข้า outbox หลัง push ล้มเหลวจึงปลอดภัย ทั้งที่มันจะอันตรายภายใต้ last-write-wins?
+2. `head` ใน response ของ POST คืออะไร และทำไม client ไม่ต้องใช้มันเพื่อ advance cursor (ต่างจาก pull)?
+3. ทำไมต้องจัดกลุ่ม op ตาม note ก่อน POST แทนที่จะส่งทั้ง outbox เป็น request เดียว?
+4. scenario duplicate-op แบบไหนที่ drain-and-re-enqueue ทำให้เกิดได้ และทำไมมันไม่ทำลาย convergence?
+
+## Recap
+
+push drain outbox, batch op ตาม note, POST แต่ละ batch ไป `/docs/:id/ops`, แล้ว re-enqueue ตอนล้มเหลว — พึ่ง commutativity และ idempotence ของ CRDT เพื่อให้ retry ปลอดภัยแบบง่าย ๆ การเขียนอยู่ในเครื่องและทันที ส่วน network คือ pass เบื้องหลังที่วนผ่าน outbox
+
+push แค่ส่งอย่างเดียว ต่อไปเราจะเอา remote op กลับมาแล้ว merge แบบ conflict-free: [Pulling & Merging →](/offlinenotes/th/push-pull/pulling-and-merging/)

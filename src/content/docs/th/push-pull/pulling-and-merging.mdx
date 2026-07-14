@@ -1,0 +1,133 @@
+---
+title: Pulling & Merging
+description: "Pull op ที่ device อื่น push มา, ป้อนให้ NoteDoc.merge, persist snapshot ใหม่, แล้ว re-render — conflict-free ไม่มี prompt"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+ฝั่ง pull และผลตอบแทน สำหรับ note หนึ่งอัน เราอ่าน cursor `pulled:<noteId>` จาก store `meta`, `GET /docs/:id/ops?since=<cursor>`, ส่ง raw op ให้ `NoteDoc.merge(ops)`, persist snapshot ที่ merge แล้วกลับลง IndexedDB, advance cursor ไปที่ `head` ของ server, แล้ว re-render
+
+นี่ปิด loop ที่ [Pushing Local Ops →](/offlinenotes/th/push-pull/pushing-local-ops/) เปิดไว้: device หนึ่ง push อีก device หนึ่ง pull แล้ว merge เพราะ merge เป็น CRDT merge สอง device ที่แก้ note เดียวกันตอน offline จึง converge ไปที่ข้อความ *เดียวกัน* — โดยไม่มี prompt "เอาเวอร์ชันไหน?" เลยสักครั้ง
+
+## Why
+
+สถาปัตยกรรมทั้งหมดมีอยู่เพื่อบรรทัดเดียวนี้: `doc.merge(ops)` [WASM CRDT engine](/offlinenotes/th/wiring-wasm/) คือสิ่งที่ทำให้ apply remote op แบบไม่ต้องดูอะไรได้อย่างปลอดภัย เราไม่ diff เราไม่ถาม user เราไม่สนว่า op มาถึงในลำดับไหน — เราแค่พับมันเข้า `NoteDoc` ในเครื่อง แล้วการรับประกันของมัน (commutative, associative, idempotent) จัดการที่เหลือ นั่นคือเหตุผลทั้งหมดที่ server อยู่เป็น relay โง่ ๆ ได้: ความฉลาดอยู่ใน merge และ merge อยู่บนทุก client
+
+cursor คือสิ่งที่ทำให้ pull ถูกและถูกต้อง เราเก็บ `seq` ตัวใหญ่สุดที่เรา merge แล้วไว้เป็น `pulled:<noteId>` ใน `meta` pull ครั้งถัดไปจึงขอเฉพาะ op หลังจากนั้น และเพราะ `merge` เป็น idempotent ต่อให้ cursor ตามหลังแล้วเรา re-pull op ที่พับไปแล้ว การ re-merge มันก็ไม่เปลี่ยนอะไร — cursor ที่เก่าเสียแค่ bandwidth นิดหน่อย ไม่เคยเสีย correctness
+
+## Pros & cons
+
+**Merge-then-persist-snapshot vs replaying the whole op log**
+
+- **Pros:** เราเก็บ snapshot ที่ authoritative หนึ่งอันต่อ note ใน `docs` แล้วพับ op ใหม่เข้าไปทีละส่วน การ reload คือ `fromSnapshot` ไม่ใช่ replay ทั้งหมด — เร็วและถูกจำกัดด้วยขนาด note ไม่ใช่ความยาวของ history
+- **Cons:** snapshot เป็น derived state ที่เราต้องคอยให้ตรงจังหวะกับ cursor persist snapshot และ advance `pulled:<noteId>` ไปด้วยกัน ไม่งั้น crash ระหว่างสองอย่างนี้จะ re-merge op ไม่กี่ตัวในครั้งถัดไป (ไม่เป็นไร ต้องขอบคุณ idempotence — แต่ควรเข้าใจไว้)
+
+**Re-render via an event vs the store calling the UI directly**
+
+- **Pros:** pull ยัง decoupled อยู่ — มันเขียน IndexedDB แล้ว fire event; `<note-editor>` / `<note-list>` อ่านซ้ำเอง sync ไม่ต้องรู้ว่ามี UI อยู่
+- **Cons:** เพิ่ม indirection อีกชั้นให้ตาม คุ้ม: event ตัวเดียวกัน fire ไม่ว่า edit จะมาจากการกดคีย์หรือจาก background pull
+
+## Set it up
+
+### 1. `apps/web/src/sync.ts`
+
+เพิ่ม `pull` ข้าง ๆ `push` โดย `NoteDoc` และ `init()` ถูกโหลดไว้แล้วตอน app boot (ดู [Wiring the WASM Core →](/offlinenotes/th/wiring-wasm/)) ตรงนี้เราจึงแค่สร้างจาก snapshot ที่เก็บไว้แล้ว merge
+
+```ts
+import { NoteDoc } from '../../crates/crdt/pkg/crdt.js';
+import { getDoc, putDoc, putNote, getMeta, setMeta } from './db';
+
+const SYNC_URL = import.meta.env.PUBLIC_SYNC_URL ?? 'http://localhost:8787';
+
+export async function pull(noteId: string): Promise<void> {
+  const cursorKey = `pulled:${noteId}`;
+  const since = Number((await getMeta(cursorKey)) ?? 0);
+
+  const res = await fetch(`${SYNC_URL}/docs/${noteId}/ops?since=${since}`);
+  if (!res.ok) throw new Error(`pull failed: ${res.status}`);
+
+  const { ops, head } = (await res.json()) as {
+    ops: { seq: number; op: unknown }[];
+    head: number;
+  };
+  if (ops.length === 0) return; // already up to date
+
+  // Rebuild the note from its snapshot and fold in the remote ops.
+  const record = await getDoc(noteId); // { id, actorId, snapshot }
+  const doc = NoteDoc.fromSnapshot(record.actorId, record.snapshot);
+
+  doc.merge(ops.map((entry) => entry.op)); // the conflict-free step
+
+  // Persist the merged snapshot + the list projection, then advance the cursor.
+  await putDoc({ id: noteId, actorId: record.actorId, snapshot: doc.snapshot() });
+  await putNote({ id: noteId, title: doc.title(), updatedAt: Date.now() });
+  await setMeta(cursorKey, head);
+
+  // Nudge the UI to re-read from IndexedDB.
+  window.dispatchEvent(new CustomEvent('note-changed', { detail: { id: noteId } }));
+}
+```
+
+สังเกตว่าเราส่ง `ops.map((entry) => entry.op)` — `merge` ต้องการ CRDT op เปล่า ๆ ไม่ใช่ envelope `{ seq, op }` ที่ pull endpoint ห่อมันไว้ ส่วน `seq` มีไว้เพื่อ cursor เท่านั้นตั้งแต่ต้น
+
+### 2. Sync a note: push, then pull
+
+```ts
+import { push, pull } from './sync';
+
+export async function sync(noteId: string): Promise<void> {
+  await push();       // send our ops first
+  await pull(noteId); // then fold in everyone else's
+}
+
+// on reconnect, sync the open note
+window.addEventListener('online', () => {
+  if (currentNoteId) sync(currentNoteId).catch((e) => console.debug('sync deferred:', e));
+});
+```
+
+การ push ก่อน pull ไม่ได้จำเป็นต่อ correctness — CRDT converge ยังไงก็ได้ — แต่มันหมายความว่า edit ของเราเองไปถึง server ก่อนที่เราจะขอ view ที่ merge แล้ว round-trip จึงรู้สึกทันที trigger ตรงนี้ถูกอัปเกรดให้อยู่รอดแม้ปิด tab ใน [Background Sync →](/offlinenotes/th/background-sync/)
+
+## Verify
+
+พิสูจน์ convergence ด้วยสอง client บน note เดียวกัน เริ่ม server ทั้งสองตัว แล้วเปิด app ในสอง profile (หรือ window ปกติกับ incognito) เพื่อให้แต่ละตัวได้ `actorId` และ IndexedDB ของตัวเอง:
+
+```bash
+pnpm --filter sync dev
+pnpm --filter web dev
+```
+
+1. ใน **ทั้งสอง** window เปิด note id เดียวกัน แล้วไป **offline** ในแต่ละอัน (DevTools → Network → Offline)
+2. ใน window A พิมพ์ที่ต้น body ใน window B พิมพ์ข้อความต่างกันที่ท้าย ทั้งคู่ยังไม่เห็นของอีกฝ่าย
+3. เอาทั้งคู่กลับ online แล้วรัน sync ในแต่ละ console:
+
+```js
+await (await import('/src/sync.ts')).sync('<noteId>');
+```
+
+ที่ควรได้ — หลังทั้งคู่ sync เทียบ editor และ raw CRDT text:
+
+```js
+// run in each window — the strings match exactly
+(await (await import('/src/db.ts')).getDoc('<noteId>')).snapshot;
+// both windows render the SAME merged body, with both edits present
+```
+
+Run check — ทั้งสอง window แสดงข้อความเหมือนกันเป๊ะที่มี edit **ทั้งสอง** และไม่มี conflict dialog โผล่มาเลย pull อีกครั้งใน window ไหนก็ได้ (`sync` รอบสอง): `ops` กลับมาว่าง ข้อความไม่เปลี่ยน และ cursor คงเดิม ผลลัพธ์เหมือนเดิม ไม่ขึ้นกับลำดับ idempotent — ผลตอบแทนของ CRDT ตัวเป็น ๆ
+
+ข้อควรระวังตรง ๆ ที่ควรจำไว้: delete ทิ้ง tombstone ไว้ และ op log ไม่ถูก compact ดังนั้น metadata ของ note จึงโตตาม history ของ edit production engine (Automerge, Yjs) compact ให้ ส่วนของเราสร้างไว้เพื่อเรียนรู้ เราจึงเรียกชื่อต้นทุนนี้แทนที่จะซ่อนมัน
+
+**Check your understanding:**
+
+1. ทำไม `pull` apply remote op ได้โดยไม่ diff และไม่เคย prompt user เลย?
+2. ทำไมเราส่ง `entry.op` (ไม่ใช่ทั้ง `{ seq, op }`) ให้ `NoteDoc.merge`?
+3. การ advance `pulled:<noteId>` ไปที่ `head` ป้องกันอะไรใน pull ครั้งถัดไป — และทำไมการทำมันพลาดนิดหน่อยจึงไม่เป็นไร?
+4. สอง device แก้ note เดียวกันตอน offline แล้วทั้งคู่ sync property อะไรของ merge รับประกันว่าพวกมันจะจบเหมือนกัน ไม่ว่าใคร sync ก่อน?
+
+## Recap
+
+pull อ่าน cursor `pulled:<noteId>`, ดึง op หลังจากนั้น, พับมันเข้า note ด้วย `NoteDoc.merge`, persist snapshot ที่ merge แล้วกับ list projection, advance cursor ไปที่ `head`, แล้ว fire re-render edit ที่ทำ offline พร้อมกัน converge โดยไม่มี conflict และไม่มี prompt — เหตุผลที่ดีไซน์ local-first + CRDT ทั้งหมดคุ้มค่า
+
+sync ทำงานแล้ว แต่เฉพาะตอน app เปิดอยู่ ต่อไปเราจะทำให้มัน fire เองหลัง tab หายไป: [Background Sync →](/offlinenotes/th/background-sync/)

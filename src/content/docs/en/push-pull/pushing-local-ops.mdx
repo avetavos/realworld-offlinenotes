@@ -1,0 +1,137 @@
+---
+title: Pushing Local Ops
+description: "Drain the IndexedDB outbox, POST its ops to the sync server, and advance on the head it returns — the client's push half."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+The push side of client sync. Every local edit already left an op in the `outbox` store back in [Wiring the WASM Core →](/offlinenotes/en/wiring-wasm/). Now we drain that outbox, group the ops by note, `POST` each note's ops to `/docs/:id/ops`, and advance when the server confirms a new `head`.
+
+This is the client counterpart to the [Push & Pull Endpoints →](/offlinenotes/en/sync-server/push-and-pull-endpoints/) we just built. Pull — reading remote ops back and merging them — is the [next lesson](/offlinenotes/en/push-pull/pulling-and-merging/).
+
+## Why
+
+The outbox is the seam between "edited locally" and "the server has it." Writes never block on the network: an edit persists to IndexedDB and enqueues an op, and *that's* the durable record. Push is a separate, retryable pass over the outbox that can run now, in a minute, or from a Background Sync wake-up — the edit is already safe either way.
+
+That decoupling is why push can be so blunt about failure. We drain the outbox, and if a POST fails — offline, server down — we simply **put the ops back**. That is safe precisely because CRDT ops are **commutative and idempotent**: re-sending them in a different order, or even twice, can't corrupt the merged note. A last-write-wins design could never re-enqueue like this without risking lost or clobbered edits.
+
+## Pros & cons
+
+**Drain-and-re-enqueue vs a per-op "sent" flag**
+
+- **Pros:** Dead simple — the outbox holds exactly the un-pushed ops, nothing more. No extra state to keep consistent, and failure handling is one `enqueueOp` call.
+- **Cons:** A response lost *after* the server appended means we re-send those ops, so the server stores duplicates. Harmless to convergence (idempotent merge), but it does add to the log — the same un-compacted-growth caveat the CRDT modules flagged.
+
+**Grouping ops by note vs one request per op**
+
+- **Pros:** One request per note per push, so a burst of typing becomes a single batched POST. Fewer round-trips, less overhead.
+- **Cons:** A big offline session sends one large body per note. Fine here; a production client would chunk very large batches.
+
+## Set it up
+
+### 1. `apps/web/src/sync.ts`
+
+The base URL comes from `PUBLIC_SYNC_URL` (a Vite public env var), defaulting to the dev server on 8787. We rely on the store accessors from the IndexedDB module — `drainOutbox()` reads and clears the outbox in one transaction, `enqueueOp()` puts ops back on failure.
+
+```ts
+import { drainOutbox, enqueueOp } from './db';
+
+const SYNC_URL = import.meta.env.PUBLIC_SYNC_URL ?? 'http://localhost:8787';
+
+export async function push(): Promise<void> {
+  // Atomically read + empty the outbox: `pending` is now the un-pushed set.
+  const pending = await drainOutbox(); // { seq, noteId, op }[]
+  if (pending.length === 0) return;
+
+  // Batch ops per note — one POST per note.
+  const byNote = new Map<string, typeof pending>();
+  for (const entry of pending) {
+    const list = byNote.get(entry.noteId) ?? [];
+    list.push(entry);
+    byNote.set(entry.noteId, list);
+  }
+
+  for (const [noteId, entries] of byNote) {
+    const ops = entries.map((e) => e.op);
+    try {
+      const res = await fetch(`${SYNC_URL}/docs/${noteId}/ops`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ops }),
+      });
+      if (!res.ok) throw new Error(`push failed: ${res.status}`);
+
+      const { head } = (await res.json()) as { head: number };
+      console.debug(`pushed ${ops.length} op(s) for ${noteId}; server head ${head}`);
+    } catch (err) {
+      // Offline or server down: put them back. Safe because the CRDT merge
+      // is commutative + idempotent — order and repeats don't matter.
+      for (const entry of entries) await enqueueOp(entry.noteId, entry.op);
+      throw err;
+    }
+  }
+}
+```
+
+### 2. Trigger a push after edits
+
+Call `push()` opportunistically — after a save, and whenever the browser regains connectivity. This is the direct trigger; [Background Sync →](/offlinenotes/en/background-sync/) makes it survive the app being closed.
+
+```ts
+import { push } from './sync';
+
+// after persisting an edit + enqueuing its op
+push().catch((err) => console.debug('push deferred:', err));
+
+// and when we come back online
+window.addEventListener('online', () => {
+  push().catch((err) => console.debug('push deferred:', err));
+});
+```
+
+A failed `push()` is not an error to surface — the ops are back in the outbox, and the next trigger retries them. The `.catch` just keeps it from becoming an unhandled rejection.
+
+## Verify
+
+Start both sides from the workspace root:
+
+```bash
+pnpm --filter sync dev   # sync server on 8787
+pnpm --filter web dev    # Astro PWA on 4321
+```
+
+Open the app at `http://localhost:4321/offlinenotes/`, edit a note, then in the DevTools console force a push:
+
+```js
+await (await import('/src/sync.ts')).push();
+// console: pushed 3 op(s) for <noteId>; server head 3
+```
+
+Confirm the server received them by pulling the same note (use the id from the log line):
+
+```bash
+curl -s 'http://localhost:8787/docs/<noteId>/ops?since=0'
+```
+
+Expected — the ops you just typed, each with a `seq`, and `head` matching the console line:
+
+```json
+{"ops":[{"seq":1,"op":{"t":"title","value":"...","ts":[1,"..."]}}],"head":1}
+```
+
+Now test the retry path: stop the sync server, edit again, and call `push()`. It throws, but re-check IndexedDB → `outbox` in DevTools → Application — the ops are **still there**. Restart the server, call `push()` again, and the outbox empties. That round-trip — fail, re-enqueue, retry, drain — is the run check for this lesson.
+
+**Check your understanding:**
+
+1. Why is it safe to put ops back in the outbox after a failed push, when it would be dangerous under last-write-wins?
+2. What is `head` in the POST response, and why doesn't the client need it to advance a cursor (unlike pull)?
+3. Why group ops by note before POSTing instead of sending the outbox as one request?
+4. What duplicate-op scenario can drain-and-re-enqueue cause, and why doesn't it break convergence?
+
+## Recap
+
+Push drains the outbox, batches ops per note, POSTs each batch to `/docs/:id/ops`, and re-enqueues on failure — leaning on the CRDT's commutativity and idempotence to make retries trivially safe. Writes stay local and instant; the network is a background pass over the outbox.
+
+Push only sends. Next we bring remote ops back and merge them conflict-free: [Pulling & Merging →](/offlinenotes/en/push-pull/pulling-and-merging/).
