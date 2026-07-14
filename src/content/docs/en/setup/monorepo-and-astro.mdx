@@ -1,0 +1,162 @@
+---
+title: Monorepo & Astro
+description: "Stand up the OfflineNotes pnpm-workspaces monorepo: an Astro + TypeScript web app, a placeholder sync server, and the Rust CRDT crate."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+The skeleton everything else hangs off: a **pnpm-workspaces monorepo** with three packages that will grow into the whole app.
+
+```
+offlinenotes/
+├── pnpm-workspace.yaml         # packages: apps/*, crates/*
+├── package.json                # root scripts (dev, build)
+├── apps/
+│   ├── web/                    # Astro app (the PWA), TypeScript, Web Components
+│   └── sync/                   # thin Hono sync server (placeholder for now)
+└── crates/
+    └── crdt/                   # Rust CRDT, compiled to WASM (next lesson)
+```
+
+By the end you'll have `apps/web` running as an Astro dev server on port 4321, `apps/sync` reserved for the Hono server (Module 9), and `crates/crdt` reserved for the Rust engine (next lesson). One `pnpm install` wires all three together.
+
+## Why
+
+OfflineNotes is really three programs that must agree on one data format: a **browser app** (TypeScript), a **sync server** (TypeScript), and a **CRDT engine** (Rust). The op that leaves the browser must be the exact shape the server stores and the engine merges. Keeping them in one repo means one clone, one install, one place where the `Op` type is defined, and no version-skew between a published package and the app that consumes it.
+
+- **pnpm workspaces** let each package keep its own `package.json` and dependencies while sharing a single lockfile and node_modules — so `apps/web` and `apps/sync` can each pull what they need without four copies of Hono on disk.
+- **Astro** hosts `apps/web` because we want a **static-first, installable** app: Astro ships zero JavaScript by default, bundles our TypeScript and Web Components with Vite, and later builds the PWA (Service Worker + manifest) cleanly. We are not building a server-rendered SPA — the app runs entirely from IndexedDB in the browser.
+- **`crates/`** sits beside `apps/` because the CRDT is a first-class part of the build, not an external dependency. `apps/web` compiles it locally with `wasm-pack` and imports the output.
+
+## Pros & cons
+
+**Monorepo (pnpm workspaces) vs. three separate repos**
+
+- **Pros:** One source of truth for the shared op format; atomic changes across client, server, and engine in a single commit; one install and one dev command.
+- **Cons:** The toolchain is heterogeneous (Node *and* Rust in one tree); CI has to build two ecosystems; the repo is larger to clone.
+
+**Astro as the app host vs. a plain Vite SPA**
+
+- **Pros:** Static output that a Service Worker can precache verbatim; islands/zero-JS defaults keep the shell tiny; first-class TypeScript and Vite without hand-rolling a config.
+- **Cons:** Astro's component model (`.astro` files, islands) is one more concept to learn when our runtime UI is plain custom elements; some Astro features (SSR, view transitions) we deliberately won't use.
+
+## Set it up
+
+### 1. `offlinenotes/pnpm-workspace.yaml`
+
+Create the project directory and declare the workspace globs. pnpm treats every directory matched by these globs that contains a `package.json` as a workspace package.
+
+```yaml
+packages:
+  - "apps/*"
+  - "crates/*"
+```
+
+`crates/*` is listed for symmetry; `crates/crdt` is a Rust crate with no `package.json`, so pnpm simply ignores it — the web app consumes its compiled WASM output as a build artifact, not as a workspace dependency.
+
+### 2. `offlinenotes/package.json`
+
+The root package is private and holds the scripts you'll run day to day. We'll flesh these out as WASM and the server come online.
+
+```json
+{
+  "name": "offlinenotes",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter web build"
+  }
+}
+```
+
+`--filter web` targets the package **named** `web` (which we set in step 3), regardless of its folder — that decoupling is why we rename the scaffold below.
+
+### 3. `apps/web` — scaffold Astro + TypeScript
+
+Generate a minimal Astro app straight into `apps/web`. The `--` forwards the flags through pnpm to `create-astro`.
+
+```bash
+pnpm create astro@latest apps/web -- \
+  --template minimal --typescript strict --no-install --no-git
+```
+
+Then open `apps/web/package.json` and set its name to `web` so the root `--filter web` script resolves:
+
+```json
+{
+  "name": "web",
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  }
+}
+```
+
+(The scaffold adds `dependencies`/`devDependencies` — leave those as generated. Only the `name` matters here.)
+
+### 4. `apps/sync/package.json` — a placeholder
+
+Reserve the sync server package so the workspace is complete. Hono arrives in Module 9; for now it's an empty private package.
+
+```json
+{
+  "name": "sync",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module"
+}
+```
+
+### 5. `crates/crdt` — reserve the folder
+
+Create the empty `crates/crdt/` directory. The [next lesson](/offlinenotes/en/setup/the-rust-crate/) fills it with the Rust crate and the `wasm-pack` toolchain, so there's nothing to write yet — the folder just needs to exist for the layout to make sense.
+
+## Verify
+
+Install from the repo root. pnpm reads `pnpm-workspace.yaml`, resolves all packages, and creates one lockfile.
+
+```bash
+pnpm install
+```
+
+Expected: pnpm reports the workspace packages it found and writes `pnpm-lock.yaml`:
+
+```
+Scope: all 2 workspace projects
+...
+Done in Xs
+```
+
+Now start the web app through the root script:
+
+```bash
+pnpm dev
+```
+
+Expected — Astro's dev server, on the default port:
+
+```
+ astro  vX.X.X ready in NNN ms
+┃ Local    http://localhost:4321/
+```
+
+Open `http://localhost:4321/` and confirm the default Astro page renders. That's the run check: the workspace resolves, `--filter web` finds the app, and Astro serves. Stop the server with `Ctrl+C`.
+
+**Check your understanding:**
+
+1. Why does the root `dev` script use `--filter web` instead of `--filter apps/web`? What decouples the two?
+2. `crates/*` is in the workspace globs, but `crates/crdt` is never installed by pnpm. Why not, and how does `apps/web` actually get the CRDT?
+3. What does Astro give us that a plain Vite SPA wouldn't, given that our UI is ultimately vanilla custom elements?
+4. Name one concrete cost of putting the Rust engine, the browser app, and the sync server in one repo.
+
+## Recap
+
+You have a pnpm-workspaces monorepo: an Astro + TypeScript `apps/web` that runs on port 4321, a placeholder `apps/sync`, and an empty `crates/crdt` waiting for Rust. One install links them; one `pnpm dev` runs the app.
+
+Next, fill `crates/crdt` and stand up the toolchain that turns Rust into a WASM module the web app can import: [The Rust Crate →](/offlinenotes/en/setup/the-rust-crate/).

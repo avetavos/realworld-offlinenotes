@@ -1,0 +1,200 @@
+---
+title: The Rust Crate
+description: "สร้าง crates/crdt Rust crate, build เป็น WASM ด้วย wasm-pack, แล้ว import module ที่ compile แล้วเข้าไปใน Astro app"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+ครึ่ง Rust ของ OfflineNotes และ pipeline ที่พามันเข้ามาใน browser ในบทนี้ `crates/crdt` กลายเป็น crate จริงที่มี **exported function ตัวเล็ก ๆ ตัวเดียว** ชื่อ `crdt_version`, `wasm-pack` compile มันเป็น WebAssembly module ใน `crates/crdt/pkg`, และ `apps/web` import module นั้นแล้วเรียกใช้ function ยังไม่มี CRDT — ประเด็นคือพิสูจน์เส้นทาง Rust → WASM → JavaScript ให้ครบตั้งแต่ต้นจนจบ ก่อนที่ logic จริงจะไปพึ่งมัน
+
+## Why
+
+CRDT engine ต้อง **เหมือนกันแบบ byte-for-byte** ในทุก client เพราะสองเครื่องที่ merge op ชุดเดียวกันต้องได้ผลลัพธ์เดียวกัน การเขียนมันครั้งเดียวใน Rust แล้ว compile เป็น WASM ให้แกนกลางที่ portable, เร็ว, และ test ได้ตัวเดียว แทนที่จะ reimplement ให้ต่างกันนิด ๆ ต่อ platform แต่แกนกลางนั้นไร้ค่าจนกว่า toolchain รอบ ๆ มันจะน่าเบื่อและเชื่อถือได้ — เราจึง build ทั้ง pipeline ตอนนี้ กับ function ที่แค่ return version string ที่ซึ่งความผิดพลาดเห็นชัดและราคาถูก
+
+- **`wasm-bindgen`** generate glue ที่ให้ JavaScript เรียก Rust และส่ง type จริงข้าม boundary ได้ (ไม่ใช่แค่ตัวเลข)
+- **`wasm-pack`** ขับทั้ง build: มัน compile crate เป็น `wasm32-unknown-unknown`, รัน `wasm-bindgen`, แล้วปล่อยแพ็กเกจที่พร้อม import (`.wasm` + `.js` + `.d.ts`)
+- **`--target web`** ผลิต output แบบ ES-module ที่มี function `init()` ซึ่งคุณ `await` ก่อนเรียกอะไรก็ตาม — ตรงกับที่ Astro/Vite และ browser ต้องการพอดี โดยไม่ต้องมี loader เฉพาะ bundler
+
+## Pros & cons
+
+**Rust → WASM สำหรับ engine เทียบกับเขียน CRDT ด้วย TypeScript**
+
+- **Pros:** มี implementation ที่เชื่อถือได้ตัวเดียวใช้ร่วมกันทุก client; ownership model ของ Rust ทำให้การจดบัญชี tombstone/id ผิดแบบเนียน ๆ ได้ยาก; ความเร็ว merge เกือบเท่า native
+- **Cons:** มี toolchain และภาษาตัวที่สองใน repo; มี boundary JS↔WASM ที่คุณต้อง marshal data ข้าม; มี build step (`wasm-pack`) ที่ต้องรันก่อนแอป
+
+**`wasm-pack` เทียบกับการขับ `cargo` + `wasm-bindgen-cli` เอง**
+
+- **Pros:** คำสั่งเดียวทำ compile + bindgen + packaging; install target `wasm32` ให้คุณ; ปล่อย TypeScript declaration ให้อัตโนมัติ
+- **Cons:** มี global tool อีกตัวที่ต้อง install; มันซ่อนขั้นตอนที่คุณอาจต้องเข้าใจในที่สุด; คุณต้องยึดตามความเห็นของมันเรื่อง layout ของ output
+
+## Set it up
+
+### 1. `crates/crdt/Cargo.toml`
+
+ประกาศ crate `crate-type = ["cdylib"]` คือสิ่งที่ทำให้ `cargo` ปล่อย WebAssembly dynamic library; การเพิ่ม `"rlib"` ให้เรารัน `cargo test` ธรรมดาบน host ได้ด้วยภายหลัง (Module 6) ที่ซึ่ง CRDT logic test ได้ง่ายกว่าผ่าน browser มาก
+
+```toml
+[package]
+name = "crdt"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+```
+
+`serde` และ `serde-wasm-bindgen` จะมาเข้าลิสต์นี้เมื่อเราส่ง structured op ข้าม boundary — สำหรับ function ที่ return `String` แค่ `wasm-bindgen` ก็พอ
+
+### 2. `crates/crdt/src/lib.rs`
+
+เรามี exported function หนึ่งตัว `#[wasm_bindgen]` บอก macro ให้ generate JS binding ให้มัน; `env!("CARGO_PKG_VERSION")` อ่าน version จาก `Cargo.toml` ตอน compile ดังนั้นการเรียกสำเร็จพิสูจน์ว่า Rust code จริงรันใน browser
+
+```rust
+use wasm_bindgen::prelude::*;
+
+/// A trivial exported function — just to prove the Rust → WASM → JS path works.
+/// The real CRDT (`NoteDoc`) arrives in Module 6.
+#[wasm_bindgen]
+pub fn crdt_version() -> String {
+    format!("crdt {}", env!("CARGO_PKG_VERSION"))
+}
+```
+
+### 3. Root `package.json` — a `build:wasm` script
+
+กลับมาที่ root ของ repo เพิ่ม WASM build แล้วทำให้ `dev`/`build` ขึ้นกับมัน เพื่อให้ `pkg` มีอยู่เสมอก่อนที่ web app จะพยายาม import:
+
+```json
+{
+  "name": "offlinenotes",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "build:wasm": "wasm-pack build crates/crdt --target web",
+    "dev": "pnpm build:wasm && pnpm --filter web dev",
+    "build": "pnpm build:wasm && pnpm --filter web build"
+  }
+}
+```
+
+`wasm-pack build crates/crdt --target web` compile crate แล้วเขียน output ไปที่ `crates/crdt/pkg/` (`--out-dir` ดีฟอลต์ของมัน) รอบแรก `wasm-pack` จะ install target `wasm32-unknown-unknown` ให้คุณ
+
+### 4. `apps/web/astro.config.mjs` — an alias to `pkg`
+
+module ที่ compile แล้วอยู่นอก `apps/web` จึงตั้งชื่อ import สะอาด ๆ ให้มันแทน path `../../../..` ที่เปราะ Vite alias จัดการเรื่องนี้ตอน build:
+
+```js
+import { defineConfig } from 'astro/config';
+import { fileURLToPath } from 'node:url';
+
+export default defineConfig({
+  vite: {
+    resolve: {
+      alias: {
+        '@crdt': fileURLToPath(new URL('../../crates/crdt/pkg', import.meta.url)),
+      },
+    },
+  },
+});
+```
+
+เพื่อให้ editor/type-checker รู้จักชื่อเดียวกัน เพิ่ม entry `paths` ลงใน `apps/web/tsconfig.json` (Vite จัดการตอนรัน; TypeScript ต้องมี map ของตัวเอง):
+
+```json
+{
+  "extends": "astro/tsconfigs/strict",
+  "compilerOptions": {
+    "paths": {
+      "@crdt/*": ["../../crates/crdt/pkg/*"]
+    }
+  }
+}
+```
+
+### 5. `apps/web/src/pages/index.astro` — call across the boundary
+
+แทนที่หน้า scaffold ด้วยหน้าที่ import module แล้วเรียกมัน ด้วย `--target web` คุณต้อง `await init()` (ซึ่ง fetch และ instantiate `.wasm`) ก่อน exported function ตัวใด ๆ Vite resolve ไฟล์ `.wasm` ที่อยู่ข้างกันให้อัตโนมัติ
+
+```astro
+---
+---
+<h1>OfflineNotes</h1>
+
+<script>
+  import init, { crdt_version } from '@crdt/crdt.js';
+
+  await init();
+  console.log('WASM says:', crdt_version());
+</script>
+```
+
+หน้านี้เป็น smoke test แบบใช้แล้วทิ้ง — module [App Shell](/offlinenotes/th/app-shell/) จะแทนที่มันด้วย UI จริง
+
+### 6. `.gitignore` — ignore build output
+
+ไดเรกทอรี `pkg/` และ `target/` เป็นของที่ generate ขึ้นมา เพิ่มมันเพื่อไม่ให้ถูก commit เข้าไป:
+
+```
+crates/crdt/pkg
+crates/crdt/target
+```
+
+## Verify
+
+build WASM package จาก root ของ repo:
+
+```bash
+pnpm build:wasm
+```
+
+ที่คาดว่าจะเห็น — `wasm-pack` compile แล้วรายงานว่าสำเร็จ:
+
+```
+[INFO]: Compiling to Wasm...
+[INFO]: :-) Done in Xs
+[INFO]: :-) Your wasm pkg is ready to publish at .../crates/crdt/pkg.
+```
+
+ยืนยันว่า output มีอยู่:
+
+```bash
+ls crates/crdt/pkg
+```
+
+ที่คาดว่าจะเห็น — glue, binary และ types:
+
+```
+crdt.js  crdt.d.ts  crdt_bg.wasm  crdt_bg.wasm.d.ts  package.json
+```
+
+ทีนี้รันแอป (ซึ่ง rebuild WASM ก่อน แล้วค่อยเริ่ม Astro):
+
+```bash
+pnpm dev
+```
+
+เปิด `http://localhost:4321/`, เปิด DevTools → **Console** แล้วยืนยันบรรทัดที่ print ออกมาจาก Rust:
+
+```
+WASM says: crdt 0.1.0
+```
+
+การเห็น string นั้นคือ run check: Rust compile เป็น WASM, module load และ initialize ใน browser และ JavaScript เรียกเข้าไปในมันได้สำเร็จ
+
+**Check your understanding:**
+
+1. ทำไมคุณต้อง `await init()` ก่อนเรียก `crdt_version()`? จริง ๆ แล้ว `init()` ทำอะไร?
+2. `crate-type = ["cdylib", "rlib"]` ให้อะไรกับคุณที่ `["cdylib"]` ลำพังให้ไม่ได้?
+3. ทำไมต้อง alias `@crdt` ทั้งใน `astro.config.mjs` *และ* `tsconfig.json` — แต่ละตัวแก้ปัญหาอะไร?
+4. บทนี้ export แค่ function ตัวเล็ก ๆ ทำไมถึง build ทั้ง toolchain ตอนนี้ แทนที่จะรอตอนที่ CRDT จริงมีขึ้นมา?
+
+## Recap
+
+`crates/crdt` เป็น Rust crate จริงแล้ว, `wasm-pack build --target web` compile มันเป็น `crates/crdt/pkg`, และ `apps/web` import module นั้นผ่าน alias `@crdt` แล้วรัน Rust code ใน browser pipeline ที่จะพา CRDT ต่อไปได้รับการพิสูจน์แล้วและน่าเบื่อ
+
+นั่นจบ Setup & Tooling ต่อไป สร้าง Astro shell และ custom elements ตัวแรกที่ประกอบเป็น notes UI: [App Shell →](/offlinenotes/th/app-shell/)

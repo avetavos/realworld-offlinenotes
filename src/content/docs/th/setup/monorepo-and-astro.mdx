@@ -1,0 +1,162 @@
+---
+title: Monorepo & Astro
+description: "ตั้ง OfflineNotes monorepo แบบ pnpm-workspaces: Astro + TypeScript web app, sync server แบบ placeholder, และ Rust CRDT crate"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+โครงกระดูกที่ทุกอย่างจะแขวนต่อจากมัน: **monorepo แบบ pnpm-workspaces** ที่มีสามแพ็กเกจ ซึ่งจะโตขึ้นเป็นทั้งแอป
+
+```
+offlinenotes/
+├── pnpm-workspace.yaml         # packages: apps/*, crates/*
+├── package.json                # root scripts (dev, build)
+├── apps/
+│   ├── web/                    # Astro app (the PWA), TypeScript, Web Components
+│   └── sync/                   # thin Hono sync server (placeholder for now)
+└── crates/
+    └── crdt/                   # Rust CRDT, compiled to WASM (next lesson)
+```
+
+พอจบบท คุณจะได้ `apps/web` รันเป็น Astro dev server บนพอร์ต 4321, `apps/sync` จองไว้สำหรับ Hono server (Module 9) และ `crates/crdt` จองไว้สำหรับ Rust engine (บทถัดไป) `pnpm install` ครั้งเดียวต่อสายทั้งสามตัวเข้าด้วยกัน
+
+## Why
+
+OfflineNotes จริง ๆ แล้วคือสามโปรแกรมที่ต้องเห็นตรงกันเรื่อง data format เดียว: **browser app** (TypeScript), **sync server** (TypeScript) และ **CRDT engine** (Rust) op ที่ออกจาก browser ต้องมีรูปร่างตรงเป๊ะกับที่ server เก็บและที่ engine merge การเก็บทั้งหมดไว้ใน repo เดียวหมายถึง clone ครั้งเดียว install ครั้งเดียว มีที่เดียวที่นิยาม type `Op` และไม่มี version-skew ระหว่างแพ็กเกจที่ publish แล้วกับแอปที่ใช้มัน
+
+- **pnpm workspaces** ให้แต่ละแพ็กเกจถือ `package.json` และ dependency ของตัวเองได้ ขณะที่ใช้ lockfile และ node_modules ร่วมกันตัวเดียว — ดังนั้น `apps/web` กับ `apps/sync` ต่างดึงของที่ตัวเองต้องการได้โดยไม่ต้องมี Hono สี่ก็อปปี้บนดิสก์
+- **Astro** host `apps/web` เพราะเราต้องการแอปแบบ **static-first และ installable**: Astro ส่ง JavaScript เป็นศูนย์โดยดีฟอลต์ bundle TypeScript และ Web Components ของเราด้วย Vite และภายหลังก็ build PWA (Service Worker + manifest) ได้สะอาด เราไม่ได้สร้าง server-rendered SPA — แอปรันทั้งหมดจาก IndexedDB ใน browser
+- **`crates/`** อยู่ข้าง ๆ `apps/` เพราะ CRDT เป็นส่วนหนึ่งของ build แบบ first-class ไม่ใช่ external dependency `apps/web` compile มันในเครื่องด้วย `wasm-pack` แล้ว import output ออกมา
+
+## Pros & cons
+
+**Monorepo (pnpm workspaces) เทียบกับ repo แยกสามตัว**
+
+- **Pros:** มี source of truth เดียวสำหรับ op format ที่ใช้ร่วมกัน; เปลี่ยนแปลงข้าม client, server และ engine แบบ atomic ใน commit เดียว; install ครั้งเดียว dev command เดียว
+- **Cons:** toolchain ปนกัน (Node *และ* Rust ในต้นไม้เดียว); CI ต้อง build สอง ecosystem; repo ใหญ่ขึ้นเวลา clone
+
+**Astro เป็น host ของแอป เทียบกับ Vite SPA ล้วน ๆ**
+
+- **Pros:** output แบบ static ที่ Service Worker precache ไว้ได้ตรงตัว; islands/zero-JS โดยดีฟอลต์ทำให้ shell เล็ก; TypeScript และ Vite แบบ first-class โดยไม่ต้องเขียน config เอง
+- **Cons:** component model ของ Astro (`.astro` files, islands) เป็นอีกหนึ่งแนวคิดที่ต้องเรียน ทั้งที่ UI ตอนรันจริงของเราเป็น custom elements ล้วน; ฟีเจอร์บางอย่างของ Astro (SSR, view transitions) เราตั้งใจจะไม่ใช้
+
+## Set it up
+
+### 1. `offlinenotes/pnpm-workspace.yaml`
+
+สร้างไดเรกทอรีโปรเจกต์แล้วประกาศ workspace glob pnpm จะถือทุกไดเรกทอรีที่ตรงกับ glob เหล่านี้และมี `package.json` เป็น workspace package
+
+```yaml
+packages:
+  - "apps/*"
+  - "crates/*"
+```
+
+`crates/*` ใส่ไว้เพื่อความสมมาตร; `crates/crdt` เป็น Rust crate ที่ไม่มี `package.json` ดังนั้น pnpm ก็แค่ข้ามมันไป — web app ใช้ WASM output ที่ compile แล้วของมันเป็น build artifact ไม่ใช่ workspace dependency
+
+### 2. `offlinenotes/package.json`
+
+root package เป็น private และถือ script ที่คุณจะรันทุกวัน เราจะเติมมันให้ครบเมื่อ WASM และ server พร้อมใช้งาน
+
+```json
+{
+  "name": "offlinenotes",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter web build"
+  }
+}
+```
+
+`--filter web` เล็งไปที่แพ็กเกจที่ **ชื่อ** `web` (ซึ่งเราตั้งในขั้นตอนที่ 3) ไม่ว่ามันจะอยู่โฟลเดอร์ไหน — การแยกส่วนแบบนี้คือเหตุผลที่เรา rename scaffold ด้านล่าง
+
+### 3. `apps/web` — scaffold Astro + TypeScript
+
+สร้าง Astro app แบบ minimal ลงใน `apps/web` ตรง ๆ `--` ส่ง flag ผ่าน pnpm ต่อไปยัง `create-astro`
+
+```bash
+pnpm create astro@latest apps/web -- \
+  --template minimal --typescript strict --no-install --no-git
+```
+
+จากนั้นเปิด `apps/web/package.json` แล้วตั้งชื่อมันเป็น `web` เพื่อให้ script `--filter web` ที่ root resolve ได้:
+
+```json
+{
+  "name": "web",
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  }
+}
+```
+
+(scaffold เพิ่ม `dependencies`/`devDependencies` มาให้ — ปล่อยไว้ตามที่ generate มา มีแค่ `name` เท่านั้นที่สำคัญตรงนี้)
+
+### 4. `apps/sync/package.json` — a placeholder
+
+จองแพ็กเกจ sync server ไว้เพื่อให้ workspace ครบ Hono จะมาใน Module 9; ตอนนี้มันเป็น private package เปล่า ๆ
+
+```json
+{
+  "name": "sync",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module"
+}
+```
+
+### 5. `crates/crdt` — reserve the folder
+
+สร้างไดเรกทอรี `crates/crdt/` เปล่า ๆ [next lesson](/offlinenotes/th/setup/the-rust-crate/) จะเติม Rust crate และ toolchain `wasm-pack` ลงไป ตอนนี้จึงยังไม่มีอะไรต้องเขียน — โฟลเดอร์แค่ต้องมีอยู่เพื่อให้ layout เข้าท่า
+
+## Verify
+
+install จาก root ของ repo pnpm อ่าน `pnpm-workspace.yaml` resolve ทุกแพ็กเกจ แล้วสร้าง lockfile ตัวเดียว
+
+```bash
+pnpm install
+```
+
+ที่คาดว่าจะเห็น: pnpm รายงาน workspace package ที่มันเจอ แล้วเขียน `pnpm-lock.yaml`:
+
+```
+Scope: all 2 workspace projects
+...
+Done in Xs
+```
+
+ทีนี้เริ่ม web app ผ่าน root script:
+
+```bash
+pnpm dev
+```
+
+ที่คาดว่าจะเห็น — dev server ของ Astro บนพอร์ตดีฟอลต์:
+
+```
+ astro  vX.X.X ready in NNN ms
+┃ Local    http://localhost:4321/
+```
+
+เปิด `http://localhost:4321/` แล้วยืนยันว่าหน้า Astro ดีฟอลต์ render ออกมา นั่นคือ run check: workspace resolve ได้, `--filter web` เจอแอป และ Astro serve ได้ หยุด server ด้วย `Ctrl+C`
+
+**Check your understanding:**
+
+1. ทำไม root `dev` script ถึงใช้ `--filter web` แทน `--filter apps/web`? อะไรที่แยกสองสิ่งนี้ออกจากกัน?
+2. `crates/*` อยู่ใน workspace glob แต่ pnpm ไม่เคย install `crates/crdt` เลย ทำไมถึงไม่ install และ `apps/web` ได้ CRDT มาจริง ๆ อย่างไร?
+3. Astro ให้อะไรกับเราที่ Vite SPA ล้วน ๆ ให้ไม่ได้ ทั้งที่สุดท้ายแล้ว UI ของเราเป็น vanilla custom elements?
+4. บอกต้นทุนที่เป็นรูปธรรมสักหนึ่งอย่างของการเอา Rust engine, browser app และ sync server มาไว้ใน repo เดียว
+
+## Recap
+
+คุณมี monorepo แบบ pnpm-workspaces แล้ว: `apps/web` แบบ Astro + TypeScript ที่รันบนพอร์ต 4321, `apps/sync` แบบ placeholder และ `crates/crdt` เปล่า ๆ ที่รอ Rust install ครั้งเดียวเชื่อมมันเข้าด้วยกัน; `pnpm dev` ครั้งเดียวรันแอป
+
+ต่อไป เติม `crates/crdt` แล้วตั้ง toolchain ที่เปลี่ยน Rust ให้เป็น WASM module ที่ web app import ได้: [The Rust Crate →](/offlinenotes/th/setup/the-rust-crate/)

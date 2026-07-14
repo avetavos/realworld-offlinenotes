@@ -1,0 +1,200 @@
+---
+title: The Rust Crate
+description: "Create the crates/crdt Rust crate, build it to WASM with wasm-pack, and import the compiled module into the Astro app."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+The Rust half of OfflineNotes and the pipeline that carries it into the browser. In this lesson `crates/crdt` becomes a real crate with **one trivial exported function**, `wasm-pack` compiles it to a WebAssembly module in `crates/crdt/pkg`, and `apps/web` imports that module and calls the function. No CRDT yet — the point is to prove the Rust → WASM → JavaScript boundary end to end before any real logic depends on it.
+
+## Why
+
+The CRDT engine has to be **byte-for-byte identical** in every client, because two devices merging the same ops must reach the same result. Writing it once in Rust and compiling to WASM gives us one portable, fast, testable core instead of a subtly-different reimplementation per platform. But that core is worthless until the toolchain around it is boring and reliable — so we build the whole pipeline now, against a function that just returns a version string, where a mistake is obvious and cheap.
+
+- **`wasm-bindgen`** generates the glue that lets JavaScript call Rust and pass real types across the boundary (not just numbers).
+- **`wasm-pack`** drives the whole build: it compiles the crate to `wasm32-unknown-unknown`, runs `wasm-bindgen`, and emits a ready-to-import package (`.wasm` + `.js` + `.d.ts`).
+- **`--target web`** produces an ES-module output with an `init()` function you `await` before calling anything — exactly what Astro/Vite and the browser want, with no bundler-specific loader.
+
+## Pros & cons
+
+**Rust → WASM for the engine vs. writing the CRDT in TypeScript**
+
+- **Pros:** One authoritative implementation shared by every client; Rust's ownership model makes the tombstone/id bookkeeping hard to get subtly wrong; near-native merge speed.
+- **Cons:** A second toolchain and language in the repo; a JS↔WASM boundary you must marshal data across; a build step (`wasm-pack`) that must run before the app.
+
+**`wasm-pack` vs. driving `cargo` + `wasm-bindgen-cli` by hand**
+
+- **Pros:** One command does compile + bindgen + packaging; installs the `wasm32` target for you; emits TypeScript declarations automatically.
+- **Cons:** Another global tool to install; it hides steps you may eventually need to understand; you're on its opinions about output layout.
+
+## Set it up
+
+### 1. `crates/crdt/Cargo.toml`
+
+Declare the crate. `crate-type = ["cdylib"]` is what makes `cargo` emit a WebAssembly dynamic library; adding `"rlib"` lets us also run plain `cargo test` on the host later (Module 6), where CRDT logic is far easier to test than through the browser.
+
+```toml
+[package]
+name = "crdt"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+```
+
+`serde` and `serde-wasm-bindgen` will join this list once we pass structured ops across the boundary — for a function returning a `String`, `wasm-bindgen` alone is enough.
+
+### 2. `crates/crdt/src/lib.rs`
+
+One exported function. `#[wasm_bindgen]` tells the macro to generate JS bindings for it; `env!("CARGO_PKG_VERSION")` reads the version from `Cargo.toml` at compile time, so a successful call proves real Rust code ran in the browser.
+
+```rust
+use wasm_bindgen::prelude::*;
+
+/// A trivial exported function — just to prove the Rust → WASM → JS path works.
+/// The real CRDT (`NoteDoc`) arrives in Module 6.
+#[wasm_bindgen]
+pub fn crdt_version() -> String {
+    format!("crdt {}", env!("CARGO_PKG_VERSION"))
+}
+```
+
+### 3. Root `package.json` — a `build:wasm` script
+
+Back in the repo root, add the WASM build and make `dev`/`build` depend on it, so `pkg` always exists before the web app tries to import it:
+
+```json
+{
+  "name": "offlinenotes",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "build:wasm": "wasm-pack build crates/crdt --target web",
+    "dev": "pnpm build:wasm && pnpm --filter web dev",
+    "build": "pnpm build:wasm && pnpm --filter web build"
+  }
+}
+```
+
+`wasm-pack build crates/crdt --target web` compiles the crate and writes the output to `crates/crdt/pkg/` (its default `--out-dir`). On the first run `wasm-pack` installs the `wasm32-unknown-unknown` target for you.
+
+### 4. `apps/web/astro.config.mjs` — an alias to `pkg`
+
+The compiled module lives outside `apps/web`, so give it a clean import name instead of a fragile `../../../..` path. A Vite alias handles this at build time:
+
+```js
+import { defineConfig } from 'astro/config';
+import { fileURLToPath } from 'node:url';
+
+export default defineConfig({
+  vite: {
+    resolve: {
+      alias: {
+        '@crdt': fileURLToPath(new URL('../../crates/crdt/pkg', import.meta.url)),
+      },
+    },
+  },
+});
+```
+
+For editor/type-checker awareness of the same name, add a `paths` entry to `apps/web/tsconfig.json` (Vite handles the runtime; TypeScript needs its own map):
+
+```json
+{
+  "extends": "astro/tsconfigs/strict",
+  "compilerOptions": {
+    "paths": {
+      "@crdt/*": ["../../crates/crdt/pkg/*"]
+    }
+  }
+}
+```
+
+### 5. `apps/web/src/pages/index.astro` — call across the boundary
+
+Replace the scaffold's page with one that imports the module and calls it. With `--target web` you must `await init()` (which fetches and instantiates the `.wasm`) before any exported function. Vite resolves the sibling `.wasm` file automatically.
+
+```astro
+---
+---
+<h1>OfflineNotes</h1>
+
+<script>
+  import init, { crdt_version } from '@crdt/crdt.js';
+
+  await init();
+  console.log('WASM says:', crdt_version());
+</script>
+```
+
+This page is a throwaway smoke test — the [App Shell](/offlinenotes/en/app-shell/) module replaces it with the real UI.
+
+### 6. `.gitignore` — ignore build output
+
+The `pkg/` and `target/` directories are generated. Add them so they never get committed:
+
+```
+crates/crdt/pkg
+crates/crdt/target
+```
+
+## Verify
+
+Build the WASM package from the repo root:
+
+```bash
+pnpm build:wasm
+```
+
+Expected — `wasm-pack` compiles and reports success:
+
+```
+[INFO]: Compiling to Wasm...
+[INFO]: :-) Done in Xs
+[INFO]: :-) Your wasm pkg is ready to publish at .../crates/crdt/pkg.
+```
+
+Confirm the output exists:
+
+```bash
+ls crates/crdt/pkg
+```
+
+Expected — the glue, the binary, and the types:
+
+```
+crdt.js  crdt.d.ts  crdt_bg.wasm  crdt_bg.wasm.d.ts  package.json
+```
+
+Now run the app (which rebuilds WASM first, then starts Astro):
+
+```bash
+pnpm dev
+```
+
+Open `http://localhost:4321/`, open DevTools → **Console**, and confirm the line printed from Rust:
+
+```
+WASM says: crdt 0.1.0
+```
+
+Seeing that string is the run check: Rust compiled to WASM, the module loaded and initialized in the browser, and JavaScript called into it successfully.
+
+**Check your understanding:**
+
+1. Why must you `await init()` before calling `crdt_version()`? What does `init()` actually do?
+2. What does `crate-type = ["cdylib", "rlib"]` give you that `["cdylib"]` alone would not?
+3. Why alias `@crdt` in *both* `astro.config.mjs` and `tsconfig.json` — what does each one fix?
+4. This lesson exports only a trivial function. Why build the entire toolchain now instead of when the real CRDT exists?
+
+## Recap
+
+`crates/crdt` is a real Rust crate, `wasm-pack build --target web` compiles it into `crates/crdt/pkg`, and `apps/web` imports that module through the `@crdt` alias and runs Rust code in the browser. The pipeline that will carry the CRDT is proven and boring.
+
+That completes Setup & Tooling. Next, build the Astro shell and the first custom elements that make up the notes UI: [App Shell →](/offlinenotes/en/app-shell/).
