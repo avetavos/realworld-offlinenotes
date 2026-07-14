@@ -1,0 +1,208 @@
+---
+title: List and markdown
+description: "Build the <note-list> from IndexedDB and render the note body as markdown in the editor with a live preview."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+Two pieces finish the pre-CRDT notes experience. First, `<note-list>` reads every note from IndexedDB, renders a row per note, refreshes when the collection changes, and opens a note in the editor when you click it. Second, the editor gains a **markdown preview**: the body you type is rendered to HTML with [`marked`](https://marked.js.org/) so a note reads like a document, not raw text.
+
+This closes the loop from [Editing notes](/offlinenotes/en/notes-ui/editing-notes/): create in the editor, see it appear in the list, click to reopen, watch the markdown render. Still pre-CRDT — plain fields, no sync — but a complete local notes app.
+
+## Why
+
+- **The list reads the projection, not the documents.** `<note-list>` calls `listNotes()`, which returns `{ id, title, updatedAt }` records — no note bodies loaded, no snapshots deserialized. That's exactly why we split `notes` from `docs` two lessons ago.
+- **Event-driven refresh, not polling.** The editor already emits `notes-changed`. The list listens for it and re-reads. No timer, no shared store object — just a DOM event, which is enough at this scale and keeps the two components decoupled.
+- **A real markdown library, not a hand-rolled regex.** Markdown has real edge cases (nested lists, code fences, links). `marked` is small, synchronous, and battle-tested; reimplementing it would be a distraction from the point of this course.
+
+## Pros & cons
+
+**`marked` vs. hand-rolling markdown**
+
+- **Pros:** Correct across the tricky cases; `marked.parse(md)` is one synchronous call; ~10 KB gzipped; actively maintained and CommonMark-aligned.
+- **Cons:** A dependency, and — critically — `marked` does **not** sanitize its output. Right now every note is your own local content, so the only person who could inject a script is you; but once [sync](/offlinenotes/en/push-pull/) lands, note text arrives from other devices, and rendered HTML must be sanitized (DOMPurify) before it touches `innerHTML`. We name that seam now rather than discover it later.
+
+**A `notes-changed` DOM event vs. a shared store the list subscribes to**
+
+- **Pros:** Zero coupling between `<note-editor>` and `<note-list>` — neither holds a reference to the other; any component can emit or listen; trivial to reason about.
+- **Cons:** No payload discipline (it's a bare "something changed," so the list re-reads everything); at much larger scale you'd want a real store with granular updates. Fine here; revisited when the note store arrives in Module 7.
+
+## Set it up
+
+### 1. `apps/web` — add markdown
+
+```bash
+pnpm --filter web add marked
+```
+
+### 2. `apps/web/src/markdown.ts` — render helper
+
+Isolate rendering behind one function. Today it's a thin wrapper over `marked`; it's also the single place to add DOMPurify once notes come from elsewhere.
+
+```ts
+import { marked } from 'marked';
+
+// Render markdown to HTML. NOTE: marked does not sanitize. Notes are
+// currently the user's own local content, so this is safe today. When
+// sync (Module 10) brings in note text from other devices, wrap this in
+// DOMPurify.sanitize(...) before the HTML reaches the DOM.
+export function renderMarkdown(md: string): string {
+  return marked.parse(md, { async: false });
+}
+```
+
+`{ async: false }` pins the synchronous return type, so `renderMarkdown` returns a `string` rather than `string | Promise<string>` — cleaner for a render path.
+
+### 3. `apps/web/src/components/note-list.ts` — the list
+
+Read the projection, render rows, refresh on `notes-changed`, and emit a `note-selected` event when a row is clicked.
+
+```ts
+import { listNotes, type NoteMeta } from '../db';
+
+class NoteList extends HTMLElement {
+  #onChange = () => void this.refresh();
+
+  connectedCallback() {
+    // Re-read whenever any component reports a change.
+    document.addEventListener('notes-changed', this.#onChange);
+    void this.refresh();
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener('notes-changed', this.#onChange);
+  }
+
+  async refresh() {
+    const notes = await listNotes(); // newest first, projection only
+    this.innerHTML = notes.length
+      ? `<ul>${notes.map(this.#row).join('')}</ul>`
+      : `<p class="empty">No notes yet. Create one.</p>`;
+    this.querySelectorAll<HTMLLIElement>('li[data-id]').forEach((li) => {
+      li.addEventListener('click', () => this.#select(li.dataset.id!));
+    });
+  }
+
+  #row(note: NoteMeta): string {
+    // Titles are the user's own text; escape before templating into HTML.
+    const title = note.title.trim() || 'Untitled';
+    return `<li data-id="${note.id}">${escapeHtml(title)}</li>`;
+  }
+
+  #select(id: string) {
+    document.dispatchEvent(
+      new CustomEvent('note-selected', { detail: { id } }),
+    );
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!,
+  );
+}
+
+customElements.define('note-list', NoteList);
+```
+
+Even the plain-text title is escaped before it lands in `innerHTML` — a note titled `<script>` should render as text, not run. The list never calls `marked`; only the body is markdown.
+
+### 4. `apps/web/src/components/note-editor.ts` — add the preview
+
+Extend the editor from the previous lesson: a preview pane beside the textarea, re-rendered as you type, plus listening for `note-selected` to open a clicked note.
+
+```ts
+import { renderMarkdown } from '../markdown';
+// …existing imports from the previous lesson…
+
+class NoteEditor extends HTMLElement {
+  // …existing #current / #timer fields…
+  #onSelect = (e: Event) => {
+    const id = (e as CustomEvent<{ id: string }>).detail.id;
+    void this.open(id);
+  };
+
+  connectedCallback() {
+    this.innerHTML = `
+      <input class="title" type="text" placeholder="Title" />
+      <div class="pane">
+        <textarea class="body" placeholder="Write in markdown…"></textarea>
+        <div class="preview"></div>
+      </div>
+      <button class="delete" type="button">Delete</button>
+    `;
+    this.#input('.title').addEventListener('input', () => this.#onEdit());
+    this.#input('.body').addEventListener('input', () => {
+      this.#renderPreview();
+      this.#onEdit();
+    });
+    this.querySelector('.delete')!.addEventListener('click', () => this.#delete());
+    // Open a note when the list reports a selection.
+    document.addEventListener('note-selected', this.#onSelect);
+  }
+
+  disconnectedCallback() {
+    clearTimeout(this.#timer);
+    document.removeEventListener('note-selected', this.#onSelect);
+  }
+
+  async open(id: string) {
+    const view = await loadNote(id);
+    if (!view) return;
+    this.#current = view;
+    this.#input('.title').value = view.title;
+    this.#input('.body').value = view.body;
+    this.#renderPreview();
+  }
+
+  #renderPreview() {
+    const html = renderMarkdown(this.#input('.body').value);
+    (this.querySelector('.preview') as HTMLElement).innerHTML = html;
+  }
+
+  // …#onEdit, #persist, #delete, #announce, #input unchanged from the
+  //   previous lesson (delete should also clear .preview)…
+}
+```
+
+The preview renders on `open` and on every body edit. Because `renderMarkdown` is the only path to `innerHTML` for note content, that one function is where sanitization lands the day notes arrive from other devices — you won't have to hunt for render sites.
+
+## Verify
+
+Type-check and build:
+
+```bash
+pnpm --filter web exec tsc --noEmit
+pnpm --filter web build
+```
+
+Then run it and drive the whole loop:
+
+```bash
+pnpm --filter web dev
+```
+
+At `http://localhost:4321/offlinenotes/`:
+
+- Click **New note**, type a title and a markdown body like `# Hello\n\n- one\n- two\n\n**bold**`. The preview shows a heading, a bulleted list, and bold text.
+- The new note appears in `<note-list>` as you type the title (each save fires `notes-changed`).
+- Create a second note, then **click the first in the list** — the editor reopens it and re-renders its preview.
+- **Reload** — both notes are still listed (local-first), and clicking one restores its markdown.
+- Delete a note — it vanishes from the list immediately.
+
+As a safety check, set a note's title to `<b>x</b>` — the list shows the literal text `<b>x</b>`, not bold, confirming the title is escaped.
+
+**Check your understanding:**
+
+1. `<note-list>` calls `listNotes()`, which never loads a note body. Trace why that keeps the list cheap back to a decision made in the IndexedDB module.
+2. `marked` doesn't sanitize its output. Why is that acceptable today, and precisely which future feature makes it unacceptable?
+3. The list re-reads *all* notes on every `notes-changed`. What's the tradeoff versus a store that emits granular add/update/delete events?
+4. Titles are escaped with `escapeHtml`, but bodies are handed to `marked`. Why the different treatment, and where does the single sanitization seam for bodies live?
+
+## Recap
+
+The pre-CRDT notes app is complete: `<note-list>` renders the `notes` projection newest-first and refreshes on `notes-changed`, clicking a row opens it via `note-selected`, and the editor renders the markdown body to a live preview through a single `renderMarkdown` helper — the one spot sanitization will attach once notes sync. Titles are escaped on the way into the DOM.
+
+We've built as far as plain fields can take us. A note is still a title string and a body string with last-write-wins semantics — edit the same note on two devices and one edit is lost. Fixing that is the heart of the project. Next, [Rust → WASM Toolchain →](/offlinenotes/en/wasm-toolchain/) sets up the toolchain for the CRDT engine that will replace these plain fields with conflict-free, mergeable state.

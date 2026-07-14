@@ -1,0 +1,208 @@
+---
+title: List and markdown
+description: "สร้าง `<note-list>` จาก IndexedDB แล้ว render body ของ note เป็น markdown ใน editor พร้อม live preview"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+สองชิ้นส่วนปิดจ๊อบประสบการณ์ note แบบ pre-CRDT ชิ้นแรก `<note-list>` อ่าน note ทุกอันจาก IndexedDB, render แถวต่อ note หนึ่งแถว, refresh เมื่อ collection เปลี่ยน และเปิด note ใน editor เมื่อคุณคลิก ชิ้นที่สอง editor ได้ **markdown preview**: body ที่คุณพิมพ์ถูก render เป็น HTML ด้วย [`marked`](https://marked.js.org/) ทำให้ note อ่านเหมือนเอกสาร ไม่ใช่ text ดิบ
+
+นี่ปิด loop จาก [Editing notes](/offlinenotes/th/notes-ui/editing-notes/): สร้างใน editor, เห็นมันโผล่ใน list, คลิกเพื่อเปิดใหม่, ดู markdown render ยังเป็น pre-CRDT — field ธรรมดา ไม่มี sync — แต่เป็นแอป note ในเครื่องที่ครบสมบูรณ์
+
+## Why
+
+- **list อ่าน projection ไม่ใช่ document** `<note-list>` เรียก `listNotes()` ซึ่งคืน record `{ id, title, updatedAt }` — ไม่โหลด body ของ note ไม่ deserialize snapshot นั่นคือเหตุผลที่เราแยก `notes` ออกจาก `docs` เมื่อสองบทก่อน
+- **refresh แบบ event-driven ไม่ใช่ polling** editor emit `notes-changed` อยู่แล้ว list ฟังมันแล้วอ่านใหม่ ไม่มี timer ไม่มี shared store object — แค่ DOM event ซึ่งพอที่ scale นี้และทำให้สอง component decouple กัน
+- **library markdown จริง ไม่ใช่ regex เขียนมือ** markdown มี edge case จริง (nested list, code fence, link) `marked` เล็ก, synchronous และผ่านสนามจริงมาแล้ว การเขียนมันใหม่จะไขว้เขวจากจุดหมายของคอร์สนี้
+
+## Pros & cons
+
+**`marked` vs. hand-rolling markdown**
+
+- **Pros:** ถูกต้องในเคสยาก ๆ; `marked.parse(md)` เป็น synchronous call เดียว; ~10 KB gzipped; ดูแลอยู่จริงและ align กับ CommonMark
+- **Cons:** เป็น dependency และ — สำคัญที่สุด — `marked` **ไม่** sanitize output ของมัน ตอนนี้ทุก note เป็น content ในเครื่องของคุณเอง คนเดียวที่ inject script ได้คือคุณ; แต่พอ [sync](/offlinenotes/th/push-pull/) มาถึง text ของ note จะมาจากเครื่องอื่น และ HTML ที่ render แล้วต้องถูก sanitize (DOMPurify) ก่อนแตะ `innerHTML` เราตั้งชื่อ seam นี้ตอนนี้ ดีกว่าไปเจอทีหลัง
+
+**A `notes-changed` DOM event vs. a shared store the list subscribes to**
+
+- **Pros:** coupling ระหว่าง `<note-editor>` กับ `<note-list>` เป็นศูนย์ — ไม่มีฝ่ายไหนถือ reference ของอีกฝ่าย; component ไหนก็ emit หรือฟังได้; reason ได้ง่ายมาก
+- **Cons:** ไม่มีระเบียบเรื่อง payload (มันเป็นแค่ "มีอะไรเปลี่ยน" ดังนั้น list อ่านใหม่ทั้งหมด); ที่ scale ใหญ่กว่านี้มากคุณจะอยากได้ store จริงที่ update แบบละเอียด ที่นี่พอแล้ว; จะกลับมาดูตอน note store มาถึงใน Module 7
+
+## Set it up
+
+### 1. `apps/web` — add markdown
+
+```bash
+pnpm --filter web add marked
+```
+
+### 2. `apps/web/src/markdown.ts` — render helper
+
+แยกการ render ไว้หลังฟังก์ชันเดียว วันนี้มันเป็น wrapper บาง ๆ บน `marked`; มันยังเป็นที่เดียวที่จะเพิ่ม DOMPurify เมื่อ note มาจากที่อื่น
+
+```ts
+import { marked } from 'marked';
+
+// Render markdown to HTML. NOTE: marked does not sanitize. Notes are
+// currently the user's own local content, so this is safe today. When
+// sync (Module 10) brings in note text from other devices, wrap this in
+// DOMPurify.sanitize(...) before the HTML reaches the DOM.
+export function renderMarkdown(md: string): string {
+  return marked.parse(md, { async: false });
+}
+```
+
+`{ async: false }` ตรึง return type แบบ synchronous ดังนั้น `renderMarkdown` คืน `string` ไม่ใช่ `string | Promise<string>` — สะอาดกว่าสำหรับ render path
+
+### 3. `apps/web/src/components/note-list.ts` — the list
+
+อ่าน projection, render แถว, refresh บน `notes-changed` และ emit event `note-selected` เมื่อคลิกแถว
+
+```ts
+import { listNotes, type NoteMeta } from '../db';
+
+class NoteList extends HTMLElement {
+  #onChange = () => void this.refresh();
+
+  connectedCallback() {
+    // Re-read whenever any component reports a change.
+    document.addEventListener('notes-changed', this.#onChange);
+    void this.refresh();
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener('notes-changed', this.#onChange);
+  }
+
+  async refresh() {
+    const notes = await listNotes(); // newest first, projection only
+    this.innerHTML = notes.length
+      ? `<ul>${notes.map(this.#row).join('')}</ul>`
+      : `<p class="empty">No notes yet. Create one.</p>`;
+    this.querySelectorAll<HTMLLIElement>('li[data-id]').forEach((li) => {
+      li.addEventListener('click', () => this.#select(li.dataset.id!));
+    });
+  }
+
+  #row(note: NoteMeta): string {
+    // Titles are the user's own text; escape before templating into HTML.
+    const title = note.title.trim() || 'Untitled';
+    return `<li data-id="${note.id}">${escapeHtml(title)}</li>`;
+  }
+
+  #select(id: string) {
+    document.dispatchEvent(
+      new CustomEvent('note-selected', { detail: { id } }),
+    );
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!,
+  );
+}
+
+customElements.define('note-list', NoteList);
+```
+
+แม้ title ที่เป็น plain-text ก็ถูก escape ก่อนลง `innerHTML` — note ที่ตั้งชื่อ `<script>` ควร render เป็น text ไม่ใช่ run list ไม่เคยเรียก `marked`; มีแค่ body เท่านั้นที่เป็น markdown
+
+### 4. `apps/web/src/components/note-editor.ts` — add the preview
+
+ต่อยอด editor จากบทก่อน: pane preview ข้าง textarea, re-render ขณะพิมพ์ พร้อมฟัง `note-selected` เพื่อเปิด note ที่ถูกคลิก
+
+```ts
+import { renderMarkdown } from '../markdown';
+// …existing imports from the previous lesson…
+
+class NoteEditor extends HTMLElement {
+  // …existing #current / #timer fields…
+  #onSelect = (e: Event) => {
+    const id = (e as CustomEvent<{ id: string }>).detail.id;
+    void this.open(id);
+  };
+
+  connectedCallback() {
+    this.innerHTML = `
+      <input class="title" type="text" placeholder="Title" />
+      <div class="pane">
+        <textarea class="body" placeholder="Write in markdown…"></textarea>
+        <div class="preview"></div>
+      </div>
+      <button class="delete" type="button">Delete</button>
+    `;
+    this.#input('.title').addEventListener('input', () => this.#onEdit());
+    this.#input('.body').addEventListener('input', () => {
+      this.#renderPreview();
+      this.#onEdit();
+    });
+    this.querySelector('.delete')!.addEventListener('click', () => this.#delete());
+    // Open a note when the list reports a selection.
+    document.addEventListener('note-selected', this.#onSelect);
+  }
+
+  disconnectedCallback() {
+    clearTimeout(this.#timer);
+    document.removeEventListener('note-selected', this.#onSelect);
+  }
+
+  async open(id: string) {
+    const view = await loadNote(id);
+    if (!view) return;
+    this.#current = view;
+    this.#input('.title').value = view.title;
+    this.#input('.body').value = view.body;
+    this.#renderPreview();
+  }
+
+  #renderPreview() {
+    const html = renderMarkdown(this.#input('.body').value);
+    (this.querySelector('.preview') as HTMLElement).innerHTML = html;
+  }
+
+  // …#onEdit, #persist, #delete, #announce, #input unchanged from the
+  //   previous lesson (delete should also clear .preview)…
+}
+```
+
+preview render ตอน `open` และทุกครั้งที่แก้ body เพราะ `renderMarkdown` เป็น path เดียวสู่ `innerHTML` สำหรับ content ของ note ฟังก์ชันเดียวนั้นคือที่ที่ sanitization จะลงในวันที่ note มาจากเครื่องอื่น — คุณไม่ต้องไปไล่หา render site
+
+## Verify
+
+Type-check และ build:
+
+```bash
+pnpm --filter web exec tsc --noEmit
+pnpm --filter web build
+```
+
+จากนั้นรันมันแล้วขับ loop ทั้งหมด:
+
+```bash
+pnpm --filter web dev
+```
+
+ที่ `http://localhost:4321/offlinenotes/`:
+
+- คลิก **New note**, พิมพ์ title กับ body ที่เป็น markdown เช่น `# Hello\n\n- one\n- two\n\n**bold**` preview แสดง heading, bulleted list และ bold text
+- note ใหม่โผล่ใน `<note-list>` ขณะที่คุณพิมพ์ title (การเซฟแต่ละครั้งยิง `notes-changed`)
+- สร้าง note ที่สอง แล้ว **คลิกอันแรกใน list** — editor เปิดมันใหม่และ re-render preview
+- **Reload** — note ทั้งสองยังอยู่ใน list (local-first) และคลิกอันหนึ่งก็คืน markdown ของมัน
+- ลบ note — มันหายจาก list ทันที
+
+เป็น safety check ให้ตั้ง title ของ note เป็น `<b>x</b>` — list แสดง text ตรงตัว `<b>x</b>` ไม่ใช่ตัวหนา ยืนยันว่า title ถูก escape
+
+**Check your understanding:**
+
+1. `<note-list>` เรียก `listNotes()` ซึ่งไม่เคยโหลด body ของ note ไล่ย้อนว่าทำไมสิ่งนี้ทำให้ list ถูก กลับไปหาการตัดสินใจที่ทำไว้ใน module IndexedDB
+2. `marked` ไม่ sanitize output ทำไมตอนนี้ถึงยอมรับได้ และ feature ในอนาคตตัวไหนกันแน่ที่ทำให้มันยอมรับไม่ได้?
+3. list อ่าน note *ทั้งหมด* ใหม่ทุก `notes-changed` tradeoff เทียบกับ store ที่ emit event add/update/delete แบบละเอียดคืออะไร?
+4. title ถูก escape ด้วย `escapeHtml` แต่ body ถูกส่งให้ `marked` ทำไมจึงปฏิบัติต่างกัน และ seam เดียวสำหรับ sanitize body อยู่ที่ไหน?
+
+## Recap
+
+แอป note แบบ pre-CRDT ครบแล้ว: `<note-list>` render projection `notes` แบบใหม่สุดก่อนและ refresh บน `notes-changed`, การคลิกแถวเปิดมันผ่าน `note-selected` และ editor render body ที่เป็น markdown เป็น live preview ผ่าน helper `renderMarkdown` ตัวเดียว — จุดเดียวที่ sanitization จะเกาะเมื่อ note sync title ถูก escape ระหว่างทางเข้า DOM
+
+เราสร้างมาไกลเท่าที่ field ธรรมดาจะพาไปได้ note ยังเป็น title string กับ body string ที่มี semantics แบบ last-write-wins — แก้ note เดียวกันบนสองเครื่อง แล้ว edit หนึ่งจะหาย การแก้เรื่องนี้คือหัวใจของโปรเจกต์ ต่อไป [Rust → WASM Toolchain →](/offlinenotes/th/wasm-toolchain/) ตั้ง toolchain สำหรับ CRDT engine ที่จะแทน field ธรรมดาเหล่านี้ด้วย state ที่ conflict-free และ merge ได้

@@ -1,0 +1,231 @@
+---
+title: Editing notes
+description: "Create, edit, and delete a note in the <note-editor> custom element, persisting to IndexedDB — plain title and body, pre-CRDT."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+We have a typed storage layer; now we put a real editor in front of it. This lesson makes `<note-editor>` — the custom element skeletoned back in [App Shell](/offlinenotes/en/app-shell/) — actually work: create a note, edit its title and body, delete it, with every change persisting to IndexedDB through the accessors from [Notes object stores](/offlinenotes/en/indexeddb/notes-object-stores/).
+
+This is **pre-CRDT** on purpose. The title and body are plain fields for now; there's no merge, no op log, no sync. That machinery arrives in [Wiring the WASM Core](/offlinenotes/en/wiring-wasm/) (Module 7). Building the UI against plain persistence first means the storage round-trip is proven and boring before we introduce the hard part.
+
+One shape decision to name up front: the `notes` store is only `{ id, title, updatedAt }` — a list projection, no body. So even now the **body lives in the `docs` snapshot** (`{ id, actorId, snapshot }`), as a plain `{ body }` object. That's not busywork: Module 7 swaps this plain snapshot for a real CRDT snapshot **in the same store**, so nothing about where the body lives has to change — only what a snapshot contains.
+
+## Why
+
+- **A custom element, not a framework component.** OfflineNotes is a Web Components app. `<note-editor>` is a real DOM element with its own lifecycle; it reads and writes storage directly (pre-CRDT) and will read/write the note store (post-CRDT) without changing its public surface.
+- **Persist on edit, not on a Save button.** Local-first means writes are cheap and local — there's no network to wait on — so the natural model is "your note is always saved," the way a native notes app behaves. We debounce lightly to avoid a write per keystroke.
+- **Split projection from body from day one.** Writing `title`/`updatedAt` to `notes` and the body to the `docs` snapshot now means the list stays cheap and the Module 7 CRDT swap is a snapshot change, not a data migration.
+
+## Pros & cons
+
+**Persist-on-input (debounced) vs. an explicit Save button**
+
+- **Pros:** Matches how local-first apps feel — nothing to forget, nothing lost on reload; no dirty-state tracking; a crash costs at most the last debounce window.
+- **Cons:** More writes; you need a debounce so typing doesn't hammer IndexedDB; "undo the whole edit" is not free the way discarding an unsaved buffer would be.
+
+**Body in the `docs` snapshot vs. adding a `body` to the `notes` store**
+
+- **Pros:** Keeps the `notes` projection tiny so the list never loads note bodies; matches the authoritative/derived split; the CRDT (Module 7) drops straight into `docs` with no schema change.
+- **Cons:** Two writes per save (projection + doc), and a note's title and body live in different stores — an inconsistency we contain by always writing both together.
+
+## Set it up
+
+### 1. `apps/web/src/notes.ts` — a small persistence helper
+
+Wrap the two-store write so `<note-editor>` doesn't repeat it. Pre-CRDT the snapshot is a plain `{ body }`; post-CRDT this helper is where the note store takes over.
+
+```ts
+import { getActorId } from './actor';
+import { getNote, putNote, getDoc, putDoc, deleteNote, type NoteMeta } from './db';
+
+export interface NoteView {
+  id: string;
+  title: string;
+  body: string;
+  updatedAt: number;
+}
+
+// Load a note for editing: title from the projection, body from the doc snapshot.
+export async function loadNote(id: string): Promise<NoteView | undefined> {
+  const meta = await getNote(id);
+  if (!meta) return undefined;
+  const doc = await getDoc(id);
+  const body = (doc?.snapshot as { body?: string } | undefined)?.body ?? '';
+  return { id, title: meta.title, body, updatedAt: meta.updatedAt };
+}
+
+// Create an empty note and persist it. Returns the new id.
+export async function createNote(): Promise<string> {
+  const id = crypto.randomUUID();
+  await saveNote({ id, title: '', body: '', updatedAt: Date.now() });
+  return id;
+}
+
+// Persist title + body: projection to `notes`, body to the `docs` snapshot.
+export async function saveNote(view: NoteView): Promise<void> {
+  const actorId = await getActorId();
+  const meta: NoteMeta = {
+    id: view.id,
+    title: view.title,
+    updatedAt: view.updatedAt,
+  };
+  await putNote(meta);
+  // Pre-CRDT the snapshot is just { body }. Module 7 replaces it with a
+  // real CRDT snapshot in this same store.
+  await putDoc({ id: view.id, actorId, snapshot: { body: view.body } });
+}
+
+export async function removeNote(id: string): Promise<void> {
+  await deleteNote(id);
+}
+```
+
+### 2. `apps/web/src/components/note-editor.ts` — the element
+
+Fill in the skeleton: a title input, a body textarea, a delete button. Persist on input behind a short debounce, and announce changes so `<note-list>` (next lesson) can refresh.
+
+```ts
+import { createNote, loadNote, removeNote, saveNote, type NoteView } from '../notes';
+
+class NoteEditor extends HTMLElement {
+  #current: NoteView | null = null;
+  #timer: number | undefined;
+
+  connectedCallback() {
+    this.innerHTML = `
+      <input class="title" type="text" placeholder="Title" />
+      <textarea class="body" placeholder="Write in markdown…"></textarea>
+      <button class="delete" type="button">Delete</button>
+    `;
+    this.#input('.title').addEventListener('input', () => this.#onEdit());
+    this.#input('.body').addEventListener('input', () => this.#onEdit());
+    this.querySelector('.delete')!.addEventListener('click', () => this.#delete());
+  }
+
+  disconnectedCallback() {
+    clearTimeout(this.#timer);
+  }
+
+  // Open an existing note for editing.
+  async open(id: string) {
+    const view = await loadNote(id);
+    if (!view) return;
+    this.#current = view;
+    this.#input('.title').value = view.title;
+    this.#input('.body').value = view.body;
+  }
+
+  // Start a fresh, empty note.
+  async new() {
+    const id = await createNote();
+    await this.open(id);
+    this.#announce();
+    this.#input('.title').focus();
+  }
+
+  #onEdit() {
+    if (!this.#current) return;
+    this.#current = {
+      ...this.#current,
+      title: this.#input('.title').value,
+      body: this.#input('.body').value,
+      updatedAt: Date.now(),
+    };
+    // Debounce: coalesce a burst of keystrokes into one write.
+    clearTimeout(this.#timer);
+    this.#timer = window.setTimeout(() => this.#persist(), 300);
+  }
+
+  async #persist() {
+    if (!this.#current) return;
+    await saveNote(this.#current);
+    this.#announce();
+  }
+
+  async #delete() {
+    if (!this.#current) return;
+    await removeNote(this.#current.id);
+    this.#current = null;
+    this.#input('.title').value = '';
+    this.#input('.body').value = '';
+    this.#announce();
+  }
+
+  // Let the rest of the app know the note set changed.
+  #announce() {
+    document.dispatchEvent(new CustomEvent('notes-changed'));
+  }
+
+  #input(sel: string) {
+    return this.querySelector(sel) as HTMLInputElement | HTMLTextAreaElement;
+  }
+}
+
+customElements.define('note-editor', NoteEditor);
+```
+
+`window.setTimeout` returns a number in the browser (not the Node `Timeout`), so `#timer` types cleanly. The `notes-changed` event is a plain DOM `CustomEvent` on `document` — the list will listen for it next lesson, and it costs nothing now.
+
+### 3. `apps/web/src/components/offline-notes-app.ts` — wire "New"
+
+Give the root a way to start a note by delegating to the editor.
+
+```ts
+class OfflineNotesApp extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <header><button class="new" type="button">New note</button></header>
+      <note-list></note-list>
+      <note-editor></note-editor>
+    `;
+    const editor = this.querySelector('note-editor') as any;
+    this.querySelector('.new')!.addEventListener('click', () => editor.new());
+  }
+}
+
+customElements.define('offline-notes-app', OfflineNotesApp);
+```
+
+## Verify
+
+Type-check and build:
+
+```bash
+pnpm --filter web exec tsc --noEmit
+pnpm --filter web build
+```
+
+Then run the app and exercise the loop by hand:
+
+```bash
+pnpm --filter web dev
+```
+
+At `http://localhost:4321/offlinenotes/`: click **New note**, type a title and a markdown body, wait a beat. In DevTools → **Application** → **IndexedDB** → **offlinenotes**, the `notes` store holds `{ id, title, updatedAt }` and `docs` holds `{ id, actorId, snapshot: { body } }` for the same id. **Reload the page** — the record is still there (that's the whole point of local-first). Click **Delete** — the id disappears from both `notes` and `docs`.
+
+Confirm the two-store write from the console:
+
+```js
+const db = await import('/src/db.ts');
+const [n] = await db.listNotes();
+console.log(n);                       // { id, title, updatedAt }
+console.log(await db.getDoc(n.id));   // { id, actorId, snapshot: { body: '…' } }
+```
+
+Title in `notes`, body in the `docs` snapshot, same id — the split is real and it survives a reload.
+
+**Check your understanding:**
+
+1. The body is stored in the `docs` snapshot, not in the `notes` store. Why, and what does that decision save the Module 7 CRDT work?
+2. `#onEdit` debounces before persisting. What breaks if you drop the debounce and write on every keystroke, and what's the worst-case data loss with a 300 ms window?
+3. `saveNote` writes to two stores every save. Which invariant are we responsible for that a single-store write would give us for free?
+4. `<note-editor>` dispatches `notes-changed` but nothing listens yet. Why emit it now rather than call the list directly?
+
+## Recap
+
+`<note-editor>` now creates, edits, and deletes notes that persist to IndexedDB across reloads — plain title and body, no CRDT yet. Title and `updatedAt` go to the `notes` projection; the body rides in the `docs` snapshot, exactly where the real CRDT snapshot will live in Module 7, so that upgrade won't move any data. Edits persist on a light debounce, and the editor announces changes with a `notes-changed` event.
+
+Nothing shows the collection yet, and the markdown body is still raw text. Next, [List and markdown →](/offlinenotes/en/notes-ui/list-and-markdown/) builds `<note-list>` from IndexedDB and renders the body as markdown in the editor.
