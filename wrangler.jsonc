@@ -1,0 +1,17 @@
+{
+  // Cloudflare Worker (static assets) for the OfflineNotes guide.
+  // The site is built with Astro `base: '/offlinenotes'`, so the built files must
+  // be served under a `/offlinenotes/` path. `npm run deploy` stages `dist/` into
+  // `.cf-assets/offlinenotes/` and serves `.cf-assets` as the asset root.
+  "name": "realworld-offlinenotes",
+  "compatibility_date": "2024-09-23",
+  "assets": {
+    "directory": "./.cf-assets"
+  },
+  // projects.avetavos.com is the shared host (taskflow owns it as a custom
+  // domain). OfflineNotes is served under /offlinenotes/* (Astro base) via a
+  // more-specific Workers route, the same way the other guides are.
+  "routes": [
+    { "pattern": "projects.avetavos.com/offlinenotes/*", "zone_name": "avetavos.com" }
+  ]
+}
