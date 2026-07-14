@@ -1,0 +1,215 @@
+---
+title: The LWW register
+description: "Build a last-writer-wins register for the note title: a value plus a Lamport timestamp, tie-broken by actor id, that merges deterministically."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+A note has two parts that merge differently. The **body** is a sequence of characters where concurrent inserts must *both* survive — that's the next lesson. The **title** is simpler: it's a single value, and when two devices set it offline, we only need to keep *one* deterministically, the same choice on every device. That's a **last-writer-wins (LWW) register**, and it's the gentlest possible CRDT to start with.
+
+This lesson builds a generic `Lww<T>` — a value paired with a Lamport timestamp — with a `merge` that keeps the newer write, and wires it into a `NoteDoc` as the `title` field. We'll implement the contract's exact `set_title`, `title`, and the `SetTitle` branch of `merge`. By the end, two `NoteDoc`s that set the title concurrently converge to the same string.
+
+## Why
+
+"Last write wins" sounds trivial until you ask *last by whose clock?* Wall-clock time is a trap: device clocks drift, so a note edited at 10:00 on a slow-clock phone could look "newer" than one edited at 10:05 on a laptop, and the wrong edit wins. Worse, wall-clock ties are possible and resolve differently on different machines — so replicas *diverge*.
+
+A **Lamport timestamp** fixes both. It's a `(counter, actor)` pair. The counter is a logical clock that only counts events, never seconds; on every local edit we increment it, and on every merge we bump it past anything we've seen (`self.counter = max(self.counter, incoming)`). Comparing two timestamps is a tuple compare: higher counter wins, and when counters *tie*, the higher `actor` id wins. That actor tie-break is the crucial bit — it makes the ordering a **total order**, so "newer" is a decision every replica reaches identically. No coordination, no central clock, and merge is order-independent.
+
+## Pros & cons
+
+**LWW register vs a sequence CRDT for the title**
+- **Pros:** Tiny — one value, one timestamp, a three-line merge. For a field where you genuinely only want one winner (a title, a color, a boolean flag), that's exactly right and cheap.
+- **Cons:** It *discards* the losing write silently. That's unacceptable for the body text (you'd lose half a paragraph), which is why the body needs the heavier sequence CRDT. Match the CRDT to what the field means.
+
+**Lamport timestamp vs wall-clock time for LWW**
+- **Pros:** No dependence on synchronized clocks; a total order via the actor tie-break, so every replica agrees on the winner; immune to clock skew and drift.
+- **Cons:** The counter only tells you *causal* order, not real elapsed time — you can't ask "which was edited earlier in seconds." For merge that's irrelevant; for a human-facing "last edited" label you'd store a separate wall-clock stamp for display only.
+
+## Set it up
+
+### 1. `crates/crdt/src/lib.rs` — the `Lww<T>` register
+
+The whole CRDT is in the tuple compare. Because `Id` is `(u32, String)`, Rust's derived `Ord` compares the counter first and falls back to the actor string — precisely the "higher counter, then higher actor" rule. `merge` keeps the greater timestamp's value; a strict `>` means merging an op you already have changes nothing (**idempotent**).
+
+```rust
+use serde::{Serialize, Deserialize};
+
+/// (Lamport counter, actor id). Tuple `Ord` compares counter then actor.
+pub type Id = (u32, String);
+
+/// A last-writer-wins register: a value stamped with a Lamport timestamp.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Lww<T> {
+    value: T,
+    ts: Id,
+}
+
+impl<T: Clone> Lww<T> {
+    fn new(value: T, ts: Id) -> Self {
+        Lww { value, ts }
+    }
+
+    /// Keep whichever write has the greater timestamp. Deterministic,
+    /// order-independent, and idempotent (`>` ignores an equal timestamp).
+    fn merge(&mut self, incoming: &Lww<T>) {
+        if incoming.ts > self.ts {
+            self.value = incoming.value.clone();
+            self.ts = incoming.ts.clone();
+        }
+    }
+}
+```
+
+### 2. The `NoteDoc` skeleton and its Lamport clock
+
+`NoteDoc` is the struct wasm-bindgen exports. It owns the actor id, a Lamport `counter`, the `title` register, and (next lesson) the body. Every local edit calls `tick()` to mint a fresh, strictly-increasing timestamp.
+
+```rust
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub struct NoteDoc {
+    actor_id: String,
+    counter: u32,
+    title: Lww<String>,
+    // body: Rga  ← added in the next lesson
+}
+
+#[wasm_bindgen]
+impl NoteDoc {
+    #[wasm_bindgen(constructor)]
+    pub fn new(actor_id: String) -> NoteDoc {
+        let ts = (0, actor_id.clone());
+        NoteDoc {
+            counter: 0,
+            title: Lww::new(String::new(), ts),
+            actor_id,
+        }
+    }
+
+    /// Increment the Lamport clock and return a fresh timestamp.
+    fn tick(&mut self) -> Id {
+        self.counter += 1;
+        (self.counter, self.actor_id.clone())
+    }
+}
+```
+
+### 3. `set_title`, `title`, and the `SetTitle` merge branch
+
+`set_title` matches the contract exactly: it stamps a new timestamp, updates the local register, and returns the op(s) it produced as a JS value — a **one-element array**, because the rest of the app always handles ops in batches. `merge` takes a JS array of ops, deserializes it, and folds each one in. Critically, merging a remote op **advances our clock** past its counter, so our next local edit is guaranteed to outrank it.
+
+```rust
+use super::Op; // the enum from the boundary lesson
+
+#[wasm_bindgen]
+impl NoteDoc {
+    /// Set the title locally. Returns [SetTitle] as a JsValue (an Op[]).
+    pub fn set_title(&mut self, title: String) -> JsValue {
+        let ts = self.tick();
+        self.title = Lww::new(title.clone(), ts.clone());
+        let ops = vec![Op::SetTitle { value: title, ts }];
+        serde_wasm_bindgen::to_value(&ops).unwrap()
+    }
+
+    /// Read the current title.
+    pub fn title(&self) -> String {
+        self.title.value.clone()
+    }
+
+    /// Apply a remote batch of ops. `ops` is a JsValue = Op[].
+    pub fn merge(&mut self, ops: JsValue) {
+        let ops: Vec<Op> = serde_wasm_bindgen::from_value(ops).unwrap();
+        for op in ops {
+            match op {
+                Op::SetTitle { value, ts } => {
+                    // advance the Lamport clock past anything we've seen
+                    self.counter = self.counter.max(ts.0);
+                    self.title.merge(&Lww::new(value, ts));
+                }
+                // Insert / Delete branches arrive in the next lesson.
+                _ => {}
+            }
+        }
+    }
+}
+```
+
+## Verify
+
+Build the crate:
+
+```bash
+cd crates/crdt
+wasm-pack build --target web
+```
+
+The real test is convergence: two docs set the title concurrently, exchange ops, and must end identical **regardless of who they think wrote last**. Because the tie-break falls to the actor id, the higher actor id ("B") wins any counter tie — and both replicas agree. Add this and run `cargo test`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ops_from(js: wasm_bindgen::JsValue) -> Vec<Op> {
+        serde_wasm_bindgen::from_value(js).unwrap()
+    }
+
+    #[test]
+    fn titles_converge_regardless_of_order() {
+        let mut a = NoteDoc::new("A".into());
+        let mut b = NoteDoc::new("B".into());
+
+        // Both edit offline at the same logical time (counter 1).
+        let op_a = a.set_title("Shopping".into());
+        let op_b = b.set_title("Groceries".into());
+
+        // Exchange. Merge is a copy-in, so re-serialize each side's op.
+        b.merge(a.set_title_echo(op_a));
+        a.merge(b.set_title_echo(op_b));
+
+        // Counter tie at 1 → higher actor "B" wins on both replicas.
+        assert_eq!(a.title(), "Groceries");
+        assert_eq!(a.title(), b.title());
+    }
+}
+```
+
+For the test to compile without a browser, add a tiny helper that just passes a `JsValue` through (in a real client the ops travel via IndexedDB and the sync server):
+
+```rust
+#[cfg(test)]
+impl NoteDoc {
+    fn set_title_echo(&self, ops: wasm_bindgen::JsValue) -> wasm_bindgen::JsValue {
+        ops // ops are plain data; hand them straight to the other replica
+    }
+}
+```
+
+```bash
+wasm-pack test --node
+```
+
+Expected — the replicas converge on the same title, actor id breaking the tie deterministically:
+
+```
+running 1 test
+test tests::titles_converge_regardless_of_order ... ok
+
+test result: ok. 1 passed; 0 failed
+```
+
+**Check your understanding:**
+
+1. Two devices set the title offline, each at counter 1. Which wins, and what guarantees both devices pick the *same* winner?
+2. Why does `merge` do `self.counter = self.counter.max(ts.0)` instead of leaving the counter alone?
+3. Why is wall-clock time a poor timestamp for an LWW register in an offline-first app?
+4. Why is an LWW register the wrong CRDT for the note *body*, even though it's fine for the title?
+
+## Recap
+
+We built `Lww<T>` — a value plus a Lamport `(counter, actor)` timestamp — and merged it by keeping the greater timestamp, with the actor id breaking ties into a total order. Wired into `NoteDoc`, that's `set_title`, `title`, and the `SetTitle` branch of `merge`, each returning or consuming the batched `Op` format the whole app shares. Concurrent title edits now converge, deterministically, with no clock and no coordinator.
+
+The title was one value. The body is a *sequence* where concurrent inserts must all survive — a harder problem, and the heart of the CRDT: [A sequence CRDT →](/offlinenotes/en/crdt-rust/a-sequence-crdt/).

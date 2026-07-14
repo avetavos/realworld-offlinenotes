@@ -1,0 +1,215 @@
+---
+title: The LWW register
+description: "สร้าง last-writer-wins register สำหรับ title ของ note: ค่าบวก Lamport timestamp ที่ตัดสินเสมอด้วย actor id และ merge แบบ deterministic"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+note มีสองส่วนที่ merge ต่างกัน **body** เป็น sequence ของตัวอักษรที่ insert พร้อมกันต้องรอด *ทั้งคู่* — นั่นคือบทถัดไป **title** ง่ายกว่า: มันเป็นค่าเดียว และเมื่อสองเครื่องตั้งมันตอน offline เราต้องเก็บไว้แค่ *อันเดียว* แบบ deterministic เป็นตัวเลือกเดียวกันบนทุกเครื่อง นั่นคือ **last-writer-wins (LWW) register** และเป็น CRDT ที่นุ่มนวลที่สุดสำหรับเริ่มต้น
+
+บทนี้สร้าง `Lww<T>` แบบ generic — ค่าที่จับคู่กับ Lamport timestamp — พร้อม `merge` ที่เก็บ write ที่ใหม่กว่า แล้วต่อสายเข้า `NoteDoc` เป็น field `title` เราจะ implement `set_title`, `title` และ branch `SetTitle` ของ `merge` ตามสัญญาเป๊ะ พอจบ `NoteDoc` สองตัวที่ตั้ง title พร้อมกันจะ converge เป็น string เดียวกัน
+
+## Why
+
+"last write wins" ฟังดูง่ายจนกว่าคุณจะถามว่า *last by whose clock?* เวลา wall-clock เป็นกับดัก: clock ของเครื่อง drift ดังนั้น note ที่แก้ตอน 10:00 บนโทรศัพท์ที่ clock ช้าอาจดู "ใหม่กว่า" อันที่แก้ตอน 10:05 บน laptop แล้ว edit ที่ผิดชนะ แย่กว่านั้น การเสมอกันแบบ wall-clock เป็นไปได้และแก้ต่างกันบนเครื่องต่างกัน — replica จึง *diverge*
+
+**Lamport timestamp** แก้ทั้งสองอย่าง มันเป็น pair `(counter, actor)` counter เป็น logical clock ที่นับแค่ event ไม่เคยนับวินาที; ทุก edit ในเครื่องเราเพิ่มมัน และทุก merge เรา bump มันข้ามอะไรก็ตามที่เราเคยเห็น (`self.counter = max(self.counter, incoming)`) การเทียบ timestamp สองตัวคือ tuple compare: counter สูงกว่าชนะ และเมื่อ counter *เสมอ* actor id สูงกว่าชนะ actor tie-break นั้นคือส่วนสำคัญ — มันทำให้ ordering เป็น **total order** ดังนั้น "ใหม่กว่า" เป็นการตัดสินใจที่ทุก replica ไปถึงเหมือนกันเป๊ะ ไม่มีการประสานงาน ไม่มี central clock และ merge ไม่ขึ้นกับลำดับ
+
+## Pros & cons
+
+**LWW register vs a sequence CRDT for the title**
+- **Pros:** เล็กจิ๋ว — ค่าเดียว, timestamp เดียว, merge สามบรรทัด สำหรับ field ที่คุณต้องการผู้ชนะเดียวจริง ๆ (title, สี, boolean flag) นั่นถูกต้องพอดีและถูก
+- **Cons:** มัน *ทิ้ง* write ที่แพ้ไปเงียบ ๆ ซึ่งยอมรับไม่ได้สำหรับ body text (คุณจะเสียครึ่งย่อหน้า) นั่นคือเหตุผลที่ body ต้องการ sequence CRDT ที่หนักกว่า จับคู่ CRDT ให้ตรงกับความหมายของ field
+
+**Lamport timestamp vs wall-clock time for LWW**
+- **Pros:** ไม่ขึ้นกับ clock ที่ sync กัน; total order ผ่าน actor tie-break ดังนั้นทุก replica เห็นด้วยเรื่องผู้ชนะ; ทนต่อ clock skew และ drift
+- **Cons:** counter บอกแค่ลำดับ *causal* ไม่ใช่เวลาจริงที่ผ่านไป — คุณถามไม่ได้ว่า "อันไหนแก้ก่อนเป็นวินาที" สำหรับ merge นั่นไม่เกี่ยว; สำหรับ label "last edited" ที่คนเห็น คุณจะเก็บ wall-clock stamp แยกไว้ show อย่างเดียว
+
+## Set it up
+
+### 1. `crates/crdt/src/lib.rs` — the `Lww<T>` register
+
+CRDT ทั้งหมดอยู่ใน tuple compare เพราะ `Id` เป็น `(u32, String)` derived `Ord` ของ Rust เทียบ counter ก่อนแล้วตกไปที่ actor string — ตรงกฎ "counter สูงกว่า แล้วค่อย actor สูงกว่า" พอดี `merge` เก็บค่าของ timestamp ที่มากกว่า; `>` แบบเข้มแปลว่าการ merge op ที่คุณมีอยู่แล้วไม่เปลี่ยนอะไร (**idempotent**)
+
+```rust
+use serde::{Serialize, Deserialize};
+
+/// (Lamport counter, actor id). Tuple `Ord` compares counter then actor.
+pub type Id = (u32, String);
+
+/// A last-writer-wins register: a value stamped with a Lamport timestamp.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Lww<T> {
+    value: T,
+    ts: Id,
+}
+
+impl<T: Clone> Lww<T> {
+    fn new(value: T, ts: Id) -> Self {
+        Lww { value, ts }
+    }
+
+    /// Keep whichever write has the greater timestamp. Deterministic,
+    /// order-independent, and idempotent (`>` ignores an equal timestamp).
+    fn merge(&mut self, incoming: &Lww<T>) {
+        if incoming.ts > self.ts {
+            self.value = incoming.value.clone();
+            self.ts = incoming.ts.clone();
+        }
+    }
+}
+```
+
+### 2. The `NoteDoc` skeleton and its Lamport clock
+
+`NoteDoc` คือ struct ที่ wasm-bindgen export มันเป็นเจ้าของ actor id, Lamport `counter`, register `title` และ (บทถัดไป) body ทุก edit ในเครื่องเรียก `tick()` เพื่อสร้าง timestamp ใหม่ที่เพิ่มขึ้นเข้มงวด
+
+```rust
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub struct NoteDoc {
+    actor_id: String,
+    counter: u32,
+    title: Lww<String>,
+    // body: Rga  ← added in the next lesson
+}
+
+#[wasm_bindgen]
+impl NoteDoc {
+    #[wasm_bindgen(constructor)]
+    pub fn new(actor_id: String) -> NoteDoc {
+        let ts = (0, actor_id.clone());
+        NoteDoc {
+            counter: 0,
+            title: Lww::new(String::new(), ts),
+            actor_id,
+        }
+    }
+
+    /// Increment the Lamport clock and return a fresh timestamp.
+    fn tick(&mut self) -> Id {
+        self.counter += 1;
+        (self.counter, self.actor_id.clone())
+    }
+}
+```
+
+### 3. `set_title`, `title`, and the `SetTitle` merge branch
+
+`set_title` ตรงกับสัญญาเป๊ะ: มัน stamp timestamp ใหม่, update register ในเครื่อง และคืน op ที่มันผลิตเป็น JS value — **array หนึ่งสมาชิก** เพราะแอปที่เหลือจัดการ op เป็น batch เสมอ `merge` รับ JS array ของ op, deserialize มัน แล้วพับแต่ละตัวเข้ามา สำคัญคือ การ merge remote op **เลื่อน clock ของเรา** ข้าม counter ของมัน ดังนั้น local edit ครั้งถัดไปของเราจะรับประกันว่า outrank มัน
+
+```rust
+use super::Op; // the enum from the boundary lesson
+
+#[wasm_bindgen]
+impl NoteDoc {
+    /// Set the title locally. Returns [SetTitle] as a JsValue (an Op[]).
+    pub fn set_title(&mut self, title: String) -> JsValue {
+        let ts = self.tick();
+        self.title = Lww::new(title.clone(), ts.clone());
+        let ops = vec![Op::SetTitle { value: title, ts }];
+        serde_wasm_bindgen::to_value(&ops).unwrap()
+    }
+
+    /// Read the current title.
+    pub fn title(&self) -> String {
+        self.title.value.clone()
+    }
+
+    /// Apply a remote batch of ops. `ops` is a JsValue = Op[].
+    pub fn merge(&mut self, ops: JsValue) {
+        let ops: Vec<Op> = serde_wasm_bindgen::from_value(ops).unwrap();
+        for op in ops {
+            match op {
+                Op::SetTitle { value, ts } => {
+                    // advance the Lamport clock past anything we've seen
+                    self.counter = self.counter.max(ts.0);
+                    self.title.merge(&Lww::new(value, ts));
+                }
+                // Insert / Delete branches arrive in the next lesson.
+                _ => {}
+            }
+        }
+    }
+}
+```
+
+## Verify
+
+Build crate:
+
+```bash
+cd crates/crdt
+wasm-pack build --target web
+```
+
+test จริงคือ convergence: สอง doc ตั้ง title พร้อมกัน, แลก op กัน และต้องจบเหมือนกัน **ไม่ว่าใครคิดว่าตัวเองเขียนทีหลัง** เพราะ tie-break ตกไปที่ actor id, actor id ที่สูงกว่า ("B") ชนะทุกการเสมอ counter — และทั้งสอง replica เห็นด้วย เพิ่มโค้ดนี้แล้วรัน `cargo test`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ops_from(js: wasm_bindgen::JsValue) -> Vec<Op> {
+        serde_wasm_bindgen::from_value(js).unwrap()
+    }
+
+    #[test]
+    fn titles_converge_regardless_of_order() {
+        let mut a = NoteDoc::new("A".into());
+        let mut b = NoteDoc::new("B".into());
+
+        // Both edit offline at the same logical time (counter 1).
+        let op_a = a.set_title("Shopping".into());
+        let op_b = b.set_title("Groceries".into());
+
+        // Exchange. Merge is a copy-in, so re-serialize each side's op.
+        b.merge(a.set_title_echo(op_a));
+        a.merge(b.set_title_echo(op_b));
+
+        // Counter tie at 1 → higher actor "B" wins on both replicas.
+        assert_eq!(a.title(), "Groceries");
+        assert_eq!(a.title(), b.title());
+    }
+}
+```
+
+เพื่อให้ test compile ได้โดยไม่ต้องมี browser ให้เพิ่ม helper เล็ก ๆ ที่แค่ส่ง `JsValue` ผ่าน (ใน client จริง op เดินทางผ่าน IndexedDB และ sync server):
+
+```rust
+#[cfg(test)]
+impl NoteDoc {
+    fn set_title_echo(&self, ops: wasm_bindgen::JsValue) -> wasm_bindgen::JsValue {
+        ops // ops are plain data; hand them straight to the other replica
+    }
+}
+```
+
+```bash
+wasm-pack test --node
+```
+
+คาดหวัง — replica converge ที่ title เดียวกัน โดย actor id ตัดสินการเสมอแบบ deterministic:
+
+```
+running 1 test
+test tests::titles_converge_regardless_of_order ... ok
+
+test result: ok. 1 passed; 0 failed
+```
+
+**Check your understanding:**
+
+1. สองเครื่องตั้ง title ตอน offline แต่ละเครื่องที่ counter 1 อันไหนชนะ และอะไรรับประกันว่าทั้งสองเครื่องเลือกผู้ชนะ *คนเดียวกัน*?
+2. ทำไม `merge` ทำ `self.counter = self.counter.max(ts.0)` แทนที่จะปล่อย counter ไว้เฉย ๆ?
+3. ทำไมเวลา wall-clock เป็น timestamp ที่แย่สำหรับ LWW register ในแอปแบบ offline-first?
+4. ทำไม LWW register จึงเป็น CRDT ที่ผิดสำหรับ *body* ของ note แม้ว่ามันจะโอเคสำหรับ title?
+
+## Recap
+
+เราสร้าง `Lww<T>` — ค่าบวก Lamport `(counter, actor)` timestamp — แล้ว merge มันด้วยการเก็บ timestamp ที่มากกว่า โดย actor id ตัดการเสมอให้เป็น total order ต่อสายเข้า `NoteDoc` นั่นคือ `set_title`, `title` และ branch `SetTitle` ของ `merge` แต่ละตัวคืนหรือ consume รูปแบบ `Op` แบบ batch ที่แอปทั้งหมดแชร์ ตอนนี้การแก้ title พร้อมกัน converge ได้ แบบ deterministic โดยไม่มี clock และไม่มี coordinator
+
+title เป็นค่าเดียว body เป็น *sequence* ที่ insert พร้อมกันต้องรอดทั้งหมด — ปัญหาที่ยากกว่า และเป็นหัวใจของ CRDT: [A sequence CRDT →](/offlinenotes/th/crdt-rust/a-sequence-crdt/)

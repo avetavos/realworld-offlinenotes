@@ -1,0 +1,252 @@
+---
+title: A sequence CRDT
+description: "Build an RGA for the note body: element ids, insert-after, tombstones, and a deterministic order that makes merge commutative, associative, and idempotent."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+The [LWW register](/offlinenotes/en/crdt-rust/lww-register/) handled the title by keeping one winner. The body can't work that way — if you type "Hello" on your phone and "World" on your laptop while both are offline, you want **both**, in a sensible order, on every device. That's a **sequence CRDT**, and we'll build the classic one: an **RGA** (Replicated Growable Array).
+
+This lesson adds an `Rga` to `NoteDoc` and implements the contract's exact `insert_text`, `delete_text`, `text`, and the `Insert`/`Delete` branches of `merge`. Every character gets a unique `(counter, actor)` id; insertions name the element they go *after*; deletions leave **tombstones**; and a deterministic ordering rule makes the whole thing converge no matter what order the ops arrive in. We'll finish by proving *why* it's commutative, associative, and idempotent — and stating honestly where this hand-built version stops.
+
+## Why
+
+The naive idea — "insert at index 5" — falls apart the instant two people edit concurrently. If I insert at index 5 and you delete index 2, my "5" now points at the wrong character on your replica. **Indices aren't stable across concurrent edits.** Positions have to be named by something that doesn't move.
+
+RGA names every character with an **immutable id** and records **what it was inserted after**, not where. An insert is "put character `X` with id `(7, "A")` immediately after the element with id `(3, "B")`." That anchor never changes, so the op means the same thing on every replica, whenever it arrives. Two people inserting after the *same* anchor is the only real contest, and RGA settles it with a fixed rule: among siblings sharing an anchor, **order by id descending** (newer id first). Since ids are globally unique and totally ordered, every replica sorts those siblings identically — so everyone ends up with the same string.
+
+Deletion is the other subtlety. You can't actually remove an element, because a concurrent insert might be anchored to it — remove it and the anchor dangles. So a delete just flips a **tombstone** flag; the element stays as an anchor point but stops showing in the text. That's what makes delete commute with everything.
+
+## Pros & cons
+
+**RGA (insert-after + tombstones) vs storing the body as an LWW string**
+- **Pros:** Concurrent inserts *both* survive in a deterministic order; no edit is silently lost. This is the actual payoff of the whole CRDT approach.
+- **Cons:** Every character carries an id and an anchor, and deleted characters linger as tombstones — the structure is far heavier than a plain string. You pay in memory for never losing an edit.
+
+**Tombstones vs actually removing deleted elements**
+- **Pros:** An element that's still someone's insert-anchor stays valid; delete becomes a simple, idempotent flag flip that commutes with every other op.
+- **Cons:** Tombstones **accumulate forever** without compaction — a heavily-edited note's memory grows with its *total* edit history, not its current length. Naming this cost is the honest caveat below.
+
+## Set it up
+
+### 1. `crates/crdt/src/lib.rs` — the RGA element and container
+
+An `Elem` is a character with its id, its anchor (`after`, or `None` for the very start), and a tombstone flag. The `Rga` keeps elements in a single `Vec` already laid out in **visible order**, so reading the text is just a filter-and-join.
+
+```rust
+use serde::{Serialize, Deserialize};
+use super::Id; // (u32, String)
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Elem {
+    id: Id,
+    after: Option<Id>, // the element this was inserted after; None = start
+    ch: String,        // one character
+    deleted: bool,     // tombstone
+}
+
+#[derive(Default, Serialize, Deserialize, Clone, Debug)]
+pub struct Rga {
+    elems: Vec<Elem>, // maintained in visible (final) order
+}
+```
+
+### 2. `integrate` — place one element deterministically
+
+This is the heart of RGA. Find the anchor's position, then walk past any siblings sharing that anchor whose id is **greater** than the newcomer's (descending-id rule), and insert. Integrating an id we already hold is a no-op — that's the **idempotence**. Because placement depends only on the anchor and the id compare, never on arrival order, two replicas that integrate the same elements land on the same sequence — that's **commutativity and associativity**.
+
+```rust
+impl Rga {
+    fn integrate(&mut self, e: Elem) {
+        // Idempotent: we've already seen this id.
+        if self.elems.iter().any(|x| x.id == e.id) {
+            return;
+        }
+
+        // Start scanning just after the anchor (or at the front if None).
+        let start = match &e.after {
+            None => 0,
+            Some(anchor) => match self.elems.iter().position(|x| &x.id == anchor) {
+                Some(p) => p + 1,
+                // Anchor not seen yet — see the ordering note under Verify.
+                None => self.elems.len(),
+            },
+        };
+
+        // Skip siblings under the same anchor with a greater id (newer-first).
+        let mut i = start;
+        while i < self.elems.len() {
+            let x = &self.elems[i];
+            if x.after == e.after && x.id > e.id {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        self.elems.insert(i, e);
+    }
+
+    fn text(&self) -> String {
+        self.elems.iter().filter(|e| !e.deleted).map(|e| e.ch.as_str()).collect()
+    }
+
+    /// The id of the visible character just before `index` (None at the start).
+    fn visible_id_before(&self, index: usize) -> Option<Id> {
+        let n = index.checked_sub(1)?;
+        self.elems.iter().filter(|e| !e.deleted).nth(n).map(|e| e.id.clone())
+    }
+
+    /// The ids of `len` visible elements starting at `index`.
+    fn visible_ids(&self, index: usize, len: usize) -> Vec<Id> {
+        self.elems.iter().filter(|e| !e.deleted)
+            .skip(index).take(len).map(|e| e.id.clone()).collect()
+    }
+
+    fn tombstone(&mut self, id: &Id) {
+        if let Some(e) = self.elems.iter_mut().find(|x| &x.id == id) {
+            e.deleted = true; // idempotent: flipping true→true is a no-op
+        }
+    }
+}
+```
+
+### 3. `insert_text`, `delete_text`, `text` on `NoteDoc`
+
+`insert_text` translates a visible `index` into an anchor id, then mints a fresh id per character, chaining each new character as the anchor for the next so a multi-character paste stays in order. It returns the batch of `Insert` ops. `delete_text` resolves the visible range to ids and tombstones them, returning `Delete` ops. Both return the exact `Op[]` shape the app stores and syncs.
+
+```rust
+use wasm_bindgen::prelude::*;
+use super::Op;
+
+#[wasm_bindgen]
+impl NoteDoc {
+    /// Insert `s` at visible `index`. Returns the produced Insert ops (Op[]).
+    pub fn insert_text(&mut self, index: usize, s: String) -> JsValue {
+        let mut after = self.body.visible_id_before(index);
+        let mut ops = Vec::new();
+        for ch in s.chars() {
+            let id = self.tick(); // (counter, actor)
+            let elem = Elem { id: id.clone(), after: after.clone(), ch: ch.to_string(), deleted: false };
+            self.body.integrate(elem);
+            ops.push(Op::Insert { id: id.clone(), after: after.clone(), ch: ch.to_string() });
+            after = Some(id); // next char anchors to this one
+        }
+        serde_wasm_bindgen::to_value(&ops).unwrap()
+    }
+
+    /// Tombstone `len` visible chars from `index`. Returns Delete ops (Op[]).
+    pub fn delete_text(&mut self, index: usize, len: usize) -> JsValue {
+        let ids = self.body.visible_ids(index, len);
+        let mut ops = Vec::new();
+        for id in ids {
+            self.body.tombstone(&id);
+            ops.push(Op::Delete { id });
+        }
+        serde_wasm_bindgen::to_value(&ops).unwrap()
+    }
+
+    /// Read the body as text.
+    pub fn text(&self) -> String {
+        self.body.text()
+    }
+}
+```
+
+### 4. Extend `merge` with the `Insert`/`Delete` branches
+
+The `merge` from the last lesson gains two arms. An incoming `Insert` advances the Lamport clock and integrates the element; a `Delete` tombstones by id. Both handlers are idempotent and their effect is independent of order — so the batch can arrive shuffled, duplicated, or interleaved with local edits, and the body still converges.
+
+```rust
+// inside the existing `for op in ops { match op { ... } }`
+Op::Insert { id, after, ch } => {
+    self.counter = self.counter.max(id.0);
+    self.body.integrate(Elem { id, after, ch, deleted: false });
+}
+Op::Delete { id } => {
+    self.body.tombstone(&id);
+}
+```
+
+## Why it converges
+
+Three properties, and where each one comes from:
+
+- **Idempotent** — `integrate` ignores an id it already holds; `tombstone` sets a flag that's already-or-soon `true`. Applying the same op twice equals applying it once, so a duplicate delivery (the sync server *will* redeliver) is harmless.
+- **Commutative** — an element's final slot is fixed by its `after` anchor and the descending-id tie-break, neither of which depends on *when* it was integrated. A tombstone only flips a flag. So op order can't change the result.
+- **Associative** — for the same reason, it doesn't matter how you *group* the merges (batch from device B, then C, versus C then B). Every grouping reaches the same sequence.
+
+Together: any replica that has seen the same **set** of ops shows the same `text()`. That's convergence — the property the whole architecture rests on.
+
+**The honest caveat.** This is a *teaching* RGA. Production apps use [Automerge](https://automerge.org/) or [Yjs](https://yjs.dev/), which handle the hard edges we've smoothed over — richer conflict cases, efficient encoding, and crucially **compaction**. Our tombstones never go away: delete a thousand characters and a thousand tombstones stay in the `Vec` forever, so memory tracks total edits, not current length. Real CRDT libraries garbage-collect tombstones once all replicas have seen the delete. We don't — and that's a deliberate limit you should be able to name, not a bug you missed.
+
+## Verify
+
+Build the crate:
+
+```bash
+cd crates/crdt
+wasm-pack build --target web
+```
+
+The capstone test: two replicas insert into the same (initially empty) body concurrently, exchange ops, and must show identical text on both — and re-merging the same ops must change nothing (idempotence). Add this and run the tests:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bodies_converge_and_merge_is_idempotent() {
+        let mut a = NoteDoc::new("A".into());
+        let mut b = NoteDoc::new("B".into());
+
+        // Concurrent inserts at index 0 of an empty body.
+        let op_a = a.insert_text(0, "Hello".into());
+        let op_b = b.insert_text(0, "World".into());
+
+        // Exchange (ops are plain data — pass them straight across).
+        b.merge(op_a.clone());
+        a.merge(op_b.clone());
+
+        // Both anchor to None; "W">"H", so B's run sorts first on both.
+        assert_eq!(a.text(), b.text());
+        assert_eq!(a.text(), "WorldHello");
+
+        // Re-merge the same ops: idempotent, nothing changes.
+        a.merge(op_b);
+        b.merge(op_a);
+        assert_eq!(a.text(), "WorldHello");
+        assert_eq!(a.text(), b.text());
+    }
+}
+```
+
+```bash
+wasm-pack test --node
+```
+
+Expected — the bodies converge to the same string, and re-applying ops is a no-op:
+
+```
+running 1 test
+test tests::bodies_converge_and_merge_is_idempotent ... ok
+
+test result: ok. 1 passed; 0 failed
+```
+
+(Ordering note: a delete arriving before the insert it targets, or an insert before its anchor, is possible only if ops are delivered out of causal order. Our sync server keeps a per-note **append-only, ordered** log, so an anchor always precedes the ops that reference it — the assumption `integrate`'s fallback leans on. A production CRDT instead buffers early ops until their dependencies arrive.)
+
+**Check your understanding:**
+
+1. Why does RGA anchor an insert to *what it comes after* instead of to a numeric index?
+2. Two devices insert different characters after the same anchor. What rule decides their order, and why does every replica agree on it?
+3. Why does deletion leave a tombstone instead of removing the element outright?
+4. Name the specific cost this hand-built RGA pays that Automerge/Yjs avoid, and what fixes it.
+
+## Recap
+
+We built an RGA for the body: characters carry immutable `(counter, actor)` ids, insertions name their anchor, deletions leave tombstones, and a descending-id tie-break gives every replica the same order. That's `insert_text`, `delete_text`, `text`, and the `Insert`/`Delete` branches of `merge` — all in the batched `Op` format the app shares. Because integrate and tombstone are idempotent and order-independent, merge is commutative, associative, and idempotent, so replicas converge. And we named the honest limit: tombstones grow without the compaction real libraries provide.
+
+The CRDT engine is now complete — `NoteDoc` turns edits into ops and merges ops back. Next we wire it into the note store, so local edits flow through the WASM core into IndexedDB: [Wiring the WASM Core →](/offlinenotes/en/wiring-wasm/).
