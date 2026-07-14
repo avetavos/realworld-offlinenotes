@@ -1,0 +1,157 @@
+---
+title: Push & Pull Endpoints
+description: "expose op log ผ่าน HTTP: POST /docs/:id/ops เพื่อ append, GET /docs/:id/ops?since= เพื่อ pull — และ wire format ที่ทั้งสองฝั่งตกลงกันเป๊ะ ๆ"
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+สอง route บน Hono server จาก[บทที่แล้ว](/offlinenotes/th/sync-server/the-op-log/) และ **wire format** ที่พวกมันพูด:
+
+- `POST /docs/:id/ops` — body `{ ops: Op[] }` → append แต่ละ op ด้วย server `seq` ตัวใหม่ แล้ว return `{ head }`
+- `GET /docs/:id/ops?since=<seq>` — return `{ ops: [{ seq, op }], head }`, ทุก op ที่เก็บไว้ **หลัง** `since`
+
+นั่นคือ sync protocol ทั้งหมด ฝั่ง client — การ drain outbox เข้า POST และป้อน GET response ผ่าน CRDT — คือ module ถัดไป [Push & Pull Sync →](/offlinenotes/th/push-pull/)
+
+## Why
+
+สอง shape นี้ asymmetric อย่างตั้งใจ ตอน **push** client ถือ op อยู่แล้ว (มันออกมาจาก WASM engine และนั่งอยู่ใน outbox) มันจึงส่ง op เปล่า ๆ และแค่ต้องรู้ว่า server รับมันแล้ว — reply จึงเป็นแค่ `{ head }`, ปลายใหม่ของ log ตอน **pull** client ต้องการทั้ง op *และ* cursor เพื่อจำว่าหยุดตรงไหน แต่ละ op จึงถูกห่อมาเป็น `{ seq, op }` และ response ทวน `head` ซ้ำ device เก็บ `seq` ตัวมากที่สุดที่มันเห็นแล้วส่งกลับเป็น `?since=` ครั้งถัดไป
+
+`since` เป็นแบบ exclusive: `?since=5` return op ที่ `seq > 5` device ที่เพิ่งเกิดใหม่ pull ด้วย `?since=0` แล้วได้ประวัติทั้งหมด นี่คือสิ่งที่ทำให้ pull **resumable และ idempotent** — pull สองครั้งด้วย cursor เดียวกันแล้วการเรียกครั้งที่สอง return op ชุดเดิม (หรือไม่มีเลย) และเพราะ CRDT merge เป็น idempotent การ re-merge มันจึงไม่เปลี่ยนอะไร
+
+## Pros & cons
+
+**pull ด้วย `seq`-cursor เทียบกับการส่ง timestamp**
+
+- **Pros:** server `seq` ที่เพิ่มขึ้นทางเดียวไม่กำกวมและไม่มีช่องว่าง ดังนั้น "ทุกอย่างหลัง N" จึงเป็น filter ที่เรียบง่ายและถูกต้อง ไม่มี clock skew ระหว่าง device ให้ต้องคิด
+- **Cons:** cursor เป็นแบบต่อ note และต่อ server; ชี้ client ไปที่ server ใหม่แล้วมันต้อง re-pull ตั้งแต่ `0` ยอมรับได้สำหรับ relay ที่ store ทิ้งได้
+
+**return `{ seq, op }` เทียบกับ return op เปล่าตอน pull**
+
+- **Pros:** client ได้ cursor มาแนบกับ data เลย มันจึงไม่ต้องเดาว่าหยุดตรงไหน — แค่ track `seq` ตัวมากที่สุด
+- **Cons:** เปลืองไม่กี่ byte ต่อ op เทียบกับ array เปล่าของ push เล็กน้อยเมื่อเทียบกับ payload ของ op และมันกำจัด bug ทั้งชนิด "ฉันพลาดไปตัวหนึ่งหรือเปล่า?" ออกไป
+
+## Set it up
+
+### 1. `apps/sync/src/index.ts`
+
+เพิ่มสอง route เข้า app เหนือ `serve(...)` พวกมันพึ่ง `append` / `since` / `head` จาก `log.ts` ทั้งหมด — handler ไม่มี logic ของตัวเองเลย
+
+```ts
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { serve } from '@hono/node-server';
+import { append, since, head, type Op } from './log.js';
+
+const app = new Hono();
+
+app.use('/docs/*', cors());
+
+app.get('/health', (c) => c.json({ ok: true }));
+
+// PUSH: append the client's ops, report the new head.
+app.post('/docs/:id/ops', async (c) => {
+  const id = c.req.param('id');
+  const { ops } = await c.req.json<{ ops: Op[] }>();
+  const head = append(id, ops);
+  return c.json({ head });
+});
+
+// PULL: every op stored after `since`, plus the current head.
+app.get('/docs/:id/ops', (c) => {
+  const id = c.req.param('id');
+  const since_ = Number(c.req.query('since') ?? 0);
+  const ops = since(id, since_);
+  return c.json({ ops, head: head(id) });
+});
+
+const port = 8787;
+serve({ fetch: app.fetch, port }, (info) => {
+  console.log(`sync server on http://localhost:${info.port}`);
+});
+
+export default app;
+```
+
+สังเกต `c.req.param('id')` สำหรับ path segment, `c.req.query('since')` สำหรับ query string (coerce ด้วย `Number` โดย default เป็น `0`) และ `await c.req.json<...>()` สำหรับ body server ไม่เคยตรวจ op — มันส่ง array `ops` ทั้งก้อนให้ `append` โดยไม่แตะ
+
+### 2. The wire format (the contract both sides obey)
+
+`op` หนึ่งตัวคือหนึ่งใน CRDT op ที่ `NoteDoc` ผลิตใน [Wiring the WASM Core →](/offlinenotes/th/wiring-wasm/) — server relay พวกนี้ตามเดิมทุกตัวอักษร:
+
+```jsonc
+// a title change (LWW register)
+{ "t": "title", "value": "Groceries", "ts": [7, "actor-a"] }
+// a text insert (RGA sequence)
+{ "t": "ins", "id": [8, "actor-a"], "after": [7, "actor-a"], "ch": "H" }
+// a text delete (tombstone)
+{ "t": "del", "id": [8, "actor-a"] }
+```
+
+envelope ของ push และ pull:
+
+```jsonc
+// POST /docs/:id/ops  — request body
+{ "ops": [ { "t": "ins", "id": [8, "actor-a"], "after": null, "ch": "H" } ] }
+// POST /docs/:id/ops  — response
+{ "head": 12 }
+
+// GET /docs/:id/ops?since=5  — response
+{ "ops": [ { "seq": 6, "op": { "t": "ins", "id": [8, "actor-a"], "after": null, "ch": "H" } } ], "head": 12 }
+```
+
+## Verify
+
+โดยที่ `pnpm --filter sync dev` รันอยู่ push สอง op ไปที่ note `n1`:
+
+```bash
+curl -s -X POST http://localhost:8787/docs/n1/ops \
+  -H 'content-type: application/json' \
+  -d '{"ops":[{"t":"title","value":"Groceries","ts":[1,"a"]},{"t":"ins","id":[2,"a"],"after":null,"ch":"H"}]}'
+```
+
+คาดหวัง — head เลื่อนไปเป็น 2:
+
+```json
+{"head":2}
+```
+
+pull ทุกอย่างตั้งแต่ต้น:
+
+```bash
+curl -s 'http://localhost:8787/docs/n1/ops?since=0'
+```
+
+คาดหวัง — ทั้งสอง op แต่ละตัวมี `seq` ของมัน:
+
+```json
+{"ops":[{"seq":1,"op":{"t":"title","value":"Groceries","ts":[1,"a"]}},{"seq":2,"op":{"t":"ins","id":[2,"a"],"after":null,"ch":"H"}}],"head":2}
+```
+
+ตอนนี้ pull ด้วย cursor ที่อยู่ตรง head — device ที่ทันสมัยแล้วจะไม่ได้อะไรใหม่:
+
+```bash
+curl -s 'http://localhost:8787/docs/n1/ops?since=2'
+```
+
+คาดหวัง:
+
+```json
+{"ops":[],"head":2}
+```
+
+Run check — การเรียก `since=2` ที่ return array `ops` ว่างพร้อม `head:2` พิสูจน์คณิตของ cursor: `since` เป็น exclusive และ device ตามทันแล้ว ปล่อย `pnpm --filter sync dev` ให้รันไว้โดยไม่มี type error ก่อนไปต่อ
+
+**ตรวจสอบความเข้าใจ:**
+
+1. ทำไม push ถึง return แค่ `{ head }` ในขณะที่ pull ห่อแต่ละ op เป็น `{ seq, op }`?
+2. `?since=0` return อะไร และเมื่อไรที่ device จะส่งมัน?
+3. `since` เป็น exclusive อะไรจะพังถ้า device เก็บ cursor ผิดแล้ว re-pull op ที่มันมีอยู่แล้ว — และทำไม CRDT ถึงทำให้เรื่องนั้นไม่มีผลร้าย?
+4. POST handler ไม่เคยมองเข้าไปใน op นั่นให้อะไรกับ server ขณะที่ CRDT โตขึ้น?
+
+## Recap
+
+ตอนนี้ server พูด protocol เต็มรูปแบบแล้ว: `POST /docs/:id/ops` append แล้ว return `head` ตัวใหม่; `GET /docs/:id/ops?since=<seq>` return `{ ops: [{ seq, op }], head }` สำหรับทุกอย่างหลัง cursor handler เป็น wrapper บาง ๆ ครอบ op log และทั้งสองฝั่งตกลงกันบน wire format เดียว
+
+ฝั่ง server ของ sync เสร็จแล้ว ต่อไปเราสร้างฝั่ง client: [Push & Pull Sync →](/offlinenotes/th/push-pull/)

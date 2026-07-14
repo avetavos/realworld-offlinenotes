@@ -1,0 +1,177 @@
+---
+title: The Op Log
+description: "Build the thin Hono sync server: a per-note, append-only op log with a server sequence number, an in-memory store, and CORS."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+The `apps/sync` server — the whole backend of OfflineNotes. It is deliberately thin: it **stores and relays** each note's CRDT ops and does nothing else. It never merges, never validates note content, never owns the truth. The client is still the source of truth (see [Wiring the WASM Core →](/offlinenotes/en/wiring-wasm/)); this server is just a mailbox that devices drop ops into and pick ops out of.
+
+In this lesson we stand up the Hono app on port 8787 with CORS, and build the **op log** it relays: for each note, an append-only list of ops, each stamped with a monotonic **server sequence number** (`seq`). Next lesson we hang the push and pull endpoints off it.
+
+## Why
+
+A CRDT converges no matter what *order* replicas see ops in — so the server's job shrinks to almost nothing. It doesn't need to understand an op; it only needs to keep every op and hand each device the ones it hasn't seen yet. That "hasn't seen yet" is the one piece of bookkeeping the server owns: a per-note sequence number. Each appended op gets the next `seq`; a device pulls with `?since=<the last seq it saw>`.
+
+Keeping the ops **opaque** on the server is the point. The server stores `{ seq, op }` without ever inspecting `op`. That is what lets the same server relay a title change, a text insert, or a delete without a line of merge logic — and what lets us swap it for Cloudflare KV, a Durable Object, or peer-to-peer transport later without touching the client's data model.
+
+## Pros & cons
+
+**In-memory `Map` vs a database**
+
+- **Pros:** Zero setup, trivial to read while learning, and it makes the protocol the star instead of the storage. The log is just `Map<noteId, {seq, op}[]>`.
+- **Cons:** Every op is lost on restart, and it doesn't scale past one process. We accept this for dev and replace it with a durable store in [Deployment →](/offlinenotes/en/deployment/).
+
+**A thin relay vs a merging server**
+
+- **Pros:** The server never has merge bugs because it never merges. It stays correct as the CRDT grows, and any transport that preserves ops works.
+- **Cons:** The server can't answer "what does this note say?" — only the client, with the WASM engine, can. Ops also accumulate without compaction (the tombstone-growth caveat from the CRDT modules applies to the log too).
+
+## Set it up
+
+### 1. `apps/sync/package.json`
+
+```json
+{
+  "name": "sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.6.0",
+    "@hono/node-server": "^1.13.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
+```
+
+### 2. `apps/sync/src/log.ts`
+
+The store. An op is **opaque** to the server — it is stored and relayed, never merged — so we type it as `unknown` and never look inside.
+
+```ts
+// An op is opaque to the server: it stores and relays, never inspects.
+export type Op = unknown;
+
+export interface StoredOp {
+  seq: number;
+  op: Op;
+}
+
+// noteId -> append-only log. Dev-only: in-memory, lost on restart.
+const logs = new Map<string, StoredOp[]>();
+
+// Append each op with the next server seq. Returns the new head.
+export function append(noteId: string, ops: Op[]): number {
+  const log = logs.get(noteId) ?? [];
+  for (const op of ops) {
+    log.push({ seq: log.length + 1, op });
+  }
+  logs.set(noteId, log);
+  return head(noteId);
+}
+
+// Every op stored after `seq` (what a device hasn't pulled yet).
+export function since(noteId: string, seq: number): StoredOp[] {
+  const log = logs.get(noteId) ?? [];
+  return log.filter((entry) => entry.seq > seq);
+}
+
+// The highest seq assigned for this note (0 if none).
+export function head(noteId: string): number {
+  return logs.get(noteId)?.length ?? 0;
+}
+```
+
+Because the log is append-only, `seq` is just the 1-based position, and `head` is the length. No gaps, always monotonic — which is exactly what a pull cursor needs.
+
+### 3. `apps/sync/src/index.ts`
+
+The Hono app: CORS on the sync routes, a health check, and the Node server on 8787. The push/pull routes land here next lesson.
+
+```ts
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { serve } from '@hono/node-server';
+
+const app = new Hono();
+
+// The PWA is served from another origin (dev 4321, prod the Pages domain),
+// so the browser sends cross-origin requests to this server. Allow them.
+app.use('/docs/*', cors());
+
+app.get('/health', (c) => c.json({ ok: true }));
+
+const port = 8787;
+serve({ fetch: app.fetch, port }, (info) => {
+  console.log(`sync server on http://localhost:${info.port}`);
+});
+
+export default app;
+```
+
+CORS matters here: the Service Worker treats the sync API as **network-only** (see [Service Worker (Offline) →](/offlinenotes/en/service-worker/)), and those fetches come from a different origin than 8787, so without `cors()` the browser blocks the responses.
+
+## Verify
+
+Install and start the server from the workspace root:
+
+```bash
+pnpm install
+pnpm --filter sync dev
+```
+
+Expected — the server announces its port:
+
+```
+sync server on http://localhost:8787
+```
+
+Hit the health route:
+
+```bash
+curl -s http://localhost:8787/health
+```
+
+Expected:
+
+```json
+{"ok":true}
+```
+
+Confirm CORS is live on the doc routes with a preflight. It should return `204` with an allow-origin header:
+
+```bash
+curl -s -i -X OPTIONS http://localhost:8787/docs/n1/ops \
+  -H 'Origin: http://localhost:4321' \
+  -H 'Access-Control-Request-Method: POST' | grep -i 'access-control-allow-origin'
+```
+
+Expected:
+
+```
+access-control-allow-origin: *
+```
+
+Run check — leave `pnpm --filter sync dev` running; `tsx watch` should report no type errors and reload cleanly on save. The server has no endpoints yet, so `curl http://localhost:8787/docs/n1/ops` returns `404` for now — we add it next.
+
+**Check your understanding:**
+
+1. Why can the server type an op as `unknown` and still relay it correctly?
+2. What does the `seq` on each stored op let a device do that a plain list wouldn't?
+3. Why is `head(noteId)` equal to the log's length in this design?
+4. Why does the server need CORS when the CRDT engine and IndexedDB never touch the network?
+
+## Recap
+
+We built the op log and the Hono shell: a per-note append-only list where each op gets a monotonic server `seq`, held in an in-memory `Map`, served on port 8787 with CORS. The server stays a thin relay — it stores and hands back opaque ops and never merges.
+
+Next, we expose the log over HTTP: [Push & Pull Endpoints →](/offlinenotes/en/sync-server/push-and-pull-endpoints/).

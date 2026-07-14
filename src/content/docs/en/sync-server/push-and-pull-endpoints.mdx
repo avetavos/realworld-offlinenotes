@@ -1,0 +1,157 @@
+---
+title: Push & Pull Endpoints
+description: "Expose the op log over HTTP: POST /docs/:id/ops to append, GET /docs/:id/ops?since= to pull — and the exact wire format both sides agree on."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+Two routes on the Hono server from the [previous lesson](/offlinenotes/en/sync-server/the-op-log/), and the **wire format** they speak:
+
+- `POST /docs/:id/ops` — body `{ ops: Op[] }` → appends each op with a new server `seq`, returns `{ head }`.
+- `GET /docs/:id/ops?since=<seq>` — returns `{ ops: [{ seq, op }], head }`, every op stored **after** `since`.
+
+That is the entire sync protocol. The client half — draining the outbox into the POST, and feeding the GET response through the CRDT — is the next module, [Push & Pull Sync →](/offlinenotes/en/push-pull/).
+
+## Why
+
+The two shapes are asymmetric on purpose. On **push**, the client already holds the ops (they came out of the WASM engine and sit in the outbox), so it sends bare ops and only needs to know the server accepted them — hence the reply is just `{ head }`, the log's new tip. On **pull**, the client needs both the ops *and* a cursor to remember where it stopped, so each op comes wrapped as `{ seq, op }` and the response repeats `head`. The device stores the largest `seq` it saw and passes it back as `?since=` next time.
+
+`since` is exclusive: `?since=5` returns ops with `seq > 5`. A brand-new device pulls with `?since=0` and gets the whole history. This is what makes pull **resumable and idempotent** — pull twice with the same cursor and the second call returns the same ops (or none), and because the CRDT merge is idempotent, re-merging them changes nothing.
+
+## Pros & cons
+
+**`seq`-cursor pull vs sending timestamps**
+
+- **Pros:** A monotonic server `seq` is unambiguous and gap-free, so "everything after N" is a trivial, correct filter. No clock skew between devices to reason about.
+- **Cons:** The cursor is per-note and per-server; point the client at a fresh server and it must re-pull from `0`. Acceptable for a relay whose store is disposable.
+
+**Returning `{ seq, op }` vs returning bare ops on pull**
+
+- **Pros:** The client gets the cursor inline with the data, so it never has to guess where it stopped — it just tracks the max `seq`.
+- **Cons:** A few extra bytes per op versus push's bare array. Trivial next to the op payload, and it removes an entire class of "did I miss one?" bugs.
+
+## Set it up
+
+### 1. `apps/sync/src/index.ts`
+
+Add the two routes to the app, above `serve(...)`. They lean entirely on `append` / `since` / `head` from `log.ts` — the handlers hold no logic of their own.
+
+```ts
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { serve } from '@hono/node-server';
+import { append, since, head, type Op } from './log.js';
+
+const app = new Hono();
+
+app.use('/docs/*', cors());
+
+app.get('/health', (c) => c.json({ ok: true }));
+
+// PUSH: append the client's ops, report the new head.
+app.post('/docs/:id/ops', async (c) => {
+  const id = c.req.param('id');
+  const { ops } = await c.req.json<{ ops: Op[] }>();
+  const head = append(id, ops);
+  return c.json({ head });
+});
+
+// PULL: every op stored after `since`, plus the current head.
+app.get('/docs/:id/ops', (c) => {
+  const id = c.req.param('id');
+  const since_ = Number(c.req.query('since') ?? 0);
+  const ops = since(id, since_);
+  return c.json({ ops, head: head(id) });
+});
+
+const port = 8787;
+serve({ fetch: app.fetch, port }, (info) => {
+  console.log(`sync server on http://localhost:${info.port}`);
+});
+
+export default app;
+```
+
+Note `c.req.param('id')` for the path segment, `c.req.query('since')` for the query string (coerced with `Number`, defaulting to `0`), and `await c.req.json<...>()` for the body. The server never inspects an op — it hands the whole `ops` array to `append` untouched.
+
+### 2. The wire format (the contract both sides obey)
+
+An `op` is one of the CRDT ops produced by `NoteDoc` in [Wiring the WASM Core →](/offlinenotes/en/wiring-wasm/) — the server relays these verbatim:
+
+```jsonc
+// a title change (LWW register)
+{ "t": "title", "value": "Groceries", "ts": [7, "actor-a"] }
+// a text insert (RGA sequence)
+{ "t": "ins", "id": [8, "actor-a"], "after": [7, "actor-a"], "ch": "H" }
+// a text delete (tombstone)
+{ "t": "del", "id": [8, "actor-a"] }
+```
+
+Push and pull envelopes:
+
+```jsonc
+// POST /docs/:id/ops  — request body
+{ "ops": [ { "t": "ins", "id": [8, "actor-a"], "after": null, "ch": "H" } ] }
+// POST /docs/:id/ops  — response
+{ "head": 12 }
+
+// GET /docs/:id/ops?since=5  — response
+{ "ops": [ { "seq": 6, "op": { "t": "ins", "id": [8, "actor-a"], "after": null, "ch": "H" } } ], "head": 12 }
+```
+
+## Verify
+
+With `pnpm --filter sync dev` running, push two ops to note `n1`:
+
+```bash
+curl -s -X POST http://localhost:8787/docs/n1/ops \
+  -H 'content-type: application/json' \
+  -d '{"ops":[{"t":"title","value":"Groceries","ts":[1,"a"]},{"t":"ins","id":[2,"a"],"after":null,"ch":"H"}]}'
+```
+
+Expected — the head advances to 2:
+
+```json
+{"head":2}
+```
+
+Pull everything from the start:
+
+```bash
+curl -s 'http://localhost:8787/docs/n1/ops?since=0'
+```
+
+Expected — both ops, each with its `seq`:
+
+```json
+{"ops":[{"seq":1,"op":{"t":"title","value":"Groceries","ts":[1,"a"]}},{"seq":2,"op":{"t":"ins","id":[2,"a"],"after":null,"ch":"H"}}],"head":2}
+```
+
+Now pull with the cursor at the head — an up-to-date device gets nothing new:
+
+```bash
+curl -s 'http://localhost:8787/docs/n1/ops?since=2'
+```
+
+Expected:
+
+```json
+{"ops":[],"head":2}
+```
+
+Run check — the `since=2` call returning an empty `ops` array with `head:2` proves the cursor math: `since` is exclusive and the device is caught up. Keep `pnpm --filter sync dev` running with no type errors before moving on.
+
+**Check your understanding:**
+
+1. Why does push return only `{ head }` while pull wraps each op as `{ seq, op }`?
+2. What does `?since=0` return, and when would a device send it?
+3. `since` is exclusive. What would break if a device stored the wrong cursor and re-pulled ops it already had — and why does the CRDT make that harmless?
+4. The POST handler never looks inside an op. What does that buy the server as the CRDT grows?
+
+## Recap
+
+The server now speaks the full protocol: `POST /docs/:id/ops` appends and returns the new `head`; `GET /docs/:id/ops?since=<seq>` returns `{ ops: [{ seq, op }], head }` for everything after the cursor. The handlers are thin wrappers over the op log, and both sides agree on one wire format.
+
+The server half of sync is done. Next we build the client half: [Push & Pull Sync →](/offlinenotes/en/push-pull/).

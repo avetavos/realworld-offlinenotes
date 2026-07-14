@@ -1,0 +1,177 @@
+---
+title: The Op Log
+description: "สร้าง Hono sync server แบบบาง: op log แบบ append-only ต่อ note พร้อม server sequence number, in-memory store, และ CORS"
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+server `apps/sync` — backend ทั้งหมดของ OfflineNotes มันบางอย่างตั้งใจ: มัน **เก็บและ relay** CRDT op ของแต่ละ note แล้วไม่ทำอะไรอย่างอื่นเลย มันไม่เคย merge, ไม่เคย validate เนื้อหา note, ไม่เคยเป็นเจ้าของความจริง client ยังคงเป็นแหล่งความจริง (ดู [Wiring the WASM Core →](/offlinenotes/th/wiring-wasm/)); server ตัวนี้เป็นแค่ตู้จดหมายที่ device หย่อน op ลงไปและหยิบ op ออกมา
+
+ในบทนี้เราตั้ง Hono app บน port 8787 พร้อม CORS และสร้าง **op log** ที่มัน relay: สำหรับแต่ละ note คือ list ของ op แบบ append-only ที่แต่ละตัวถูกประทับด้วย **server sequence number** ที่เพิ่มขึ้นทางเดียว (`seq`) บทถัดไปเราจะแขวน push และ pull endpoint ไว้บนมัน
+
+## Why
+
+CRDT converge ไม่ว่าจะเห็น op ใน *ลำดับ* ไหนก็ตาม — งานของ server จึงหดลงเหลือแทบไม่มี มันไม่ต้องเข้าใจ op; มันแค่ต้องเก็บทุก op และส่งให้แต่ละ device เฉพาะตัวที่มันยังไม่เห็น "ยังไม่เห็น" นั้นคือ bookkeeping ชิ้นเดียวที่ server เป็นเจ้าของ: sequence number ต่อ note แต่ละ op ที่ append เข้ามาจะได้ `seq` ตัวถัดไป; device pull ด้วย `?since=<seq ตัวสุดท้ายที่มันเห็น>`
+
+การเก็บ op ให้ **opaque** บน server คือหัวใจ server เก็บ `{ seq, op }` โดยไม่เคยตรวจดู `op` เลย นั่นคือสิ่งที่ทำให้ server ตัวเดียวกัน relay การเปลี่ยน title, การ insert text, หรือการ delete ได้โดยไม่มี merge logic สักบรรทัด — และเป็นสิ่งที่ทำให้เราสลับมันไปเป็น Cloudflare KV, Durable Object, หรือ peer-to-peer transport ทีหลังได้โดยไม่แตะ data model ของ client
+
+## Pros & cons
+
+**in-memory `Map` เทียบกับ database**
+
+- **Pros:** setup เป็นศูนย์ อ่านง่ายมากตอนเรียนรู้ และมันทำให้ protocol เป็นพระเอกแทน storage log เป็นแค่ `Map<noteId, {seq, op}[]>`
+- **Cons:** op ทุกตัวหายตอน restart และมัน scale ไม่ได้เกินหนึ่ง process เรายอมรับข้อนี้สำหรับ dev แล้วแทนมันด้วย durable store ใน [Deployment →](/offlinenotes/th/deployment/)
+
+**relay แบบบาง เทียบกับ server ที่ merge**
+
+- **Pros:** server ไม่เคยมี merge bug เพราะมันไม่เคย merge มันคงถูกต้องขณะที่ CRDT โตขึ้น และ transport ใดที่รักษา op ไว้ก็ใช้ได้
+- **Cons:** server ตอบไม่ได้ว่า "note นี้พูดว่าอะไร?" — มีแค่ client พร้อม WASM engine เท่านั้นที่ตอบได้ op ยังสะสมโดยไม่มี compaction (ข้อควรระวังเรื่อง tombstone โตจาก CRDT module ใช้กับ log ด้วย)
+
+## Set it up
+
+### 1. `apps/sync/package.json`
+
+```json
+{
+  "name": "sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.6.0",
+    "@hono/node-server": "^1.13.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
+```
+
+### 2. `apps/sync/src/log.ts`
+
+ตัว store op คือสิ่งที่ **opaque** ต่อ server — มันถูกเก็บและ relay ไม่เคยถูก merge — เราจึง type มันเป็น `unknown` และไม่เคยมองข้างใน
+
+```ts
+// An op is opaque to the server: it stores and relays, never inspects.
+export type Op = unknown;
+
+export interface StoredOp {
+  seq: number;
+  op: Op;
+}
+
+// noteId -> append-only log. Dev-only: in-memory, lost on restart.
+const logs = new Map<string, StoredOp[]>();
+
+// Append each op with the next server seq. Returns the new head.
+export function append(noteId: string, ops: Op[]): number {
+  const log = logs.get(noteId) ?? [];
+  for (const op of ops) {
+    log.push({ seq: log.length + 1, op });
+  }
+  logs.set(noteId, log);
+  return head(noteId);
+}
+
+// Every op stored after `seq` (what a device hasn't pulled yet).
+export function since(noteId: string, seq: number): StoredOp[] {
+  const log = logs.get(noteId) ?? [];
+  return log.filter((entry) => entry.seq > seq);
+}
+
+// The highest seq assigned for this note (0 if none).
+export function head(noteId: string): number {
+  return logs.get(noteId)?.length ?? 0;
+}
+```
+
+เพราะ log เป็น append-only `seq` จึงเป็นแค่ตำแหน่งแบบเริ่มนับ 1 และ `head` คือความยาว ไม่มีช่องว่าง เพิ่มขึ้นทางเดียวเสมอ — ซึ่งเป็นสิ่งที่ pull cursor ต้องการพอดี
+
+### 3. `apps/sync/src/index.ts`
+
+Hono app: CORS บน sync route, health check, และ Node server บน 8787 push/pull route จะมาลงที่นี่บทถัดไป
+
+```ts
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { serve } from '@hono/node-server';
+
+const app = new Hono();
+
+// The PWA is served from another origin (dev 4321, prod the Pages domain),
+// so the browser sends cross-origin requests to this server. Allow them.
+app.use('/docs/*', cors());
+
+app.get('/health', (c) => c.json({ ok: true }));
+
+const port = 8787;
+serve({ fetch: app.fetch, port }, (info) => {
+  console.log(`sync server on http://localhost:${info.port}`);
+});
+
+export default app;
+```
+
+CORS สำคัญตรงนี้: Service Worker ปฏิบัติต่อ sync API แบบ **network-only** (ดู [Service Worker (Offline) →](/offlinenotes/th/service-worker/)) และ fetch เหล่านั้นมาจาก origin ที่ต่างจาก 8787 ดังนั้นถ้าไม่มี `cors()` browser จะ block response
+
+## Verify
+
+install แล้ว start server จาก workspace root:
+
+```bash
+pnpm install
+pnpm --filter sync dev
+```
+
+คาดหวัง — server ประกาศ port ของมัน:
+
+```
+sync server on http://localhost:8787
+```
+
+ยิงไปที่ health route:
+
+```bash
+curl -s http://localhost:8787/health
+```
+
+คาดหวัง:
+
+```json
+{"ok":true}
+```
+
+ยืนยันว่า CORS ทำงานอยู่บน doc route ด้วย preflight มันควร return `204` พร้อม allow-origin header:
+
+```bash
+curl -s -i -X OPTIONS http://localhost:8787/docs/n1/ops \
+  -H 'Origin: http://localhost:4321' \
+  -H 'Access-Control-Request-Method: POST' | grep -i 'access-control-allow-origin'
+```
+
+คาดหวัง:
+
+```
+access-control-allow-origin: *
+```
+
+Run check — ปล่อย `pnpm --filter sync dev` ให้รันไว้; `tsx watch` ควรรายงานว่าไม่มี type error และ reload สะอาดเมื่อ save server ยังไม่มี endpoint เลย ดังนั้น `curl http://localhost:8787/docs/n1/ops` จะ return `404` ในตอนนี้ — เราจะเพิ่มมันบทถัดไป
+
+**ตรวจสอบความเข้าใจ:**
+
+1. ทำไม server ถึง type op เป็น `unknown` ได้และยัง relay มันได้อย่างถูกต้อง?
+2. `seq` บนแต่ละ op ที่เก็บไว้ให้ device ทำอะไรได้ที่ list ธรรมดาทำไม่ได้?
+3. ทำไม `head(noteId)` ถึงเท่ากับความยาวของ log ในดีไซน์นี้?
+4. ทำไม server ถึงต้องใช้ CORS ในเมื่อ CRDT engine และ IndexedDB ไม่เคยแตะ network เลย?
+
+## Recap
+
+เราสร้าง op log และ Hono shell แล้ว: list แบบ append-only ต่อ note ที่แต่ละ op ได้ server `seq` ที่เพิ่มขึ้นทางเดียว เก็บไว้ใน in-memory `Map` เสิร์ฟบน port 8787 พร้อม CORS server ยังคงเป็น relay แบบบาง — มันเก็บและส่ง op ที่ opaque กลับมาและไม่เคย merge
+
+ต่อไป เรา expose log ผ่าน HTTP: [Push & Pull Endpoints →](/offlinenotes/th/sync-server/push-and-pull-endpoints/)
