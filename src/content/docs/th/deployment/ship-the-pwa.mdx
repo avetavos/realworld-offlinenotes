@@ -1,0 +1,190 @@
+---
+title: Ship the PWA
+description: "Build the Astro PWA with its WASM CRDT and Service Worker, deploy the static output to Cloudflare Pages, and pass the installability checks."
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+client ของ OfflineNotes เป็นแอปแบบ *static*: HTML, CSS, JavaScript, WebAssembly binary หนึ่งตัว และ Service Worker ไม่มีส่วนไหนเลยที่ต้องมี server รันอยู่ — ข้อมูลอยู่ใน IndexedDB และการ merge รันใน WASM ในเบราว์เซอร์ ดังนั้น "การ deploy แอป" จึงหมายถึงการ build ครั้งเดียวแล้วเอาไฟล์ไปวางบน CDN
+
+ในบทนี้คุณจะ:
+
+- สร้าง production build ที่สะอาดซึ่งรวม **CRDT ที่ build ด้วย wasm-pack** และ **`sw.js`** ที่เขียนเอง,
+- deploy output จาก `dist/` ไปยัง **Cloudflare Pages**,
+- ยืนยันว่าผลลัพธ์เป็น PWA จริงที่ติดตั้งได้และยังทำงานได้ตอนปิด network
+
+sync server เป็นการ deploy แยกต่างหาก — นั่นคือ[บทถัดไป](/offlinenotes/th/deployment/deploy-the-sync-server/)
+
+## Why
+
+แอปแบบ local-first คือเคสที่ host ง่ายที่สุด และคุ้มที่จะโน้มไปทางนั้นเต็มที่ client ไม่มี origin logic ที่ต้องรันต่อ request เลย: ทุก route คือไฟล์ ทุก asset immutable เมื่อถูก fingerprint แล้ว และ "backend" ที่แอปคุยด้วย (sync server) เป็นคนละ origin กันโดยสิ้นเชิง นั่นแปลว่า **static host บน CDN ระดับ global** ไม่ใช่การประนีประนอมตรงนี้ — มันคือรูปทรงที่ถูกต้อง คุณได้ HTTPS ฟรี (ซึ่ง Service Worker และ install prompt *ต้องการ*), edge caching และ atomic rollout และคุณไม่เคยต้อง patch server ตอนตีสองเพราะตัวแอป notes เองไม่มี server ให้ patch
+
+Cloudflare Pages คือ host แบบนั้นตัวหนึ่ง; Netlify, Vercel static หรือ GitHub Pages ก็เสิร์ฟ `dist/` ตัวเดียวกันได้ดีพอกัน เราใช้ Pages เพราะ sync server ในบทถัดไปเป็น Cloudflare Worker ดังนั้นบัญชีเดียวและ CLI เดียว (`wrangler`) ครอบคลุมทั้งสองอย่าง
+
+## Pros & cons
+
+**Static host (Cloudflare Pages) vs a Node server rendering the app**
+
+- **Pros:** ไม่มี server process ให้รัน scale หรือ secure; ทั้งแอป cache ได้ที่ edge; HTTPS และ custom domain มีมาให้ในตัว; deploy ที่พังจะ roll back ไป build ก่อนหน้าที่ immutable ได้ทันที มันเข้ากับ architecture — client เป็นเจ้าของข้อมูลของตัวเองอยู่แล้ว จึงไม่มีอะไรให้ app server *ทำ*
+- **Cons:** ไม่มี server-side rendering หรือ secret ต่อ request ดังนั้นอะไรที่ dynamic ต้องเกิดฝั่ง client หรือที่ API แยก (ซึ่งเป็นวิธีที่ออกแบบ sync ไว้พอดี) คุณยังรับกฎ caching ของ CDN มาด้วย และต้องตั้งใจไม่ให้ cache ตัว `sw.js` เอง
+
+**`wrangler pages deploy ./dist` (CLI) vs Git-connected auto-deploy**
+
+- **Pros of the CLI:** การ deploy ชัดเจนและเขียนสคริปต์ได้ — คุณ build ในเครื่อง เห็นชัดว่าอะไรจะถูกส่งขึ้น แล้ว push ด้วยคำสั่งเดียว; เหมาะกับการเรียนรู้และ CI ที่คุณคุมเอง **Pros of Git-connected:** ทุก push ไป `main` จะ build และ deploy อัตโนมัติ พร้อม preview URL ต่อ pull request และไม่ต้องมี build environment ในเครื่องเลย
+- **Cons:** CLI ต้องให้คุณ (หรือ CI) รัน build ให้ถูกต้องทุกครั้ง รวมถึงขั้น WASM; Git-connected ซ่อน build ไว้บน runner ของ Cloudflare ดังนั้นคุณต้อง reproduce toolchain ของ Rust + wasm-pack ใน build image ของเขา ซึ่งมีชิ้นส่วนที่ต้องดูแลมากกว่า build JS ธรรมดา เราจะใช้ CLI เพื่อให้ขั้น WASM ยังมองเห็นอยู่
+
+## Set it up
+
+### 1. `package.json` (root) — build WASM, then the app
+
+กฎเดียวที่เจาะจงเรื่อง deployment: WASM ต้องถูก build **ก่อน** ที่ Astro จะ build เพราะ web app import มันจาก `crates/crdt/pkg` ต่อสายลำดับนั้นไว้ในสคริปต์เดียว เพื่อให้การ deploy ไม่มีทางส่ง binary เก่าค้างขึ้นไปได้
+
+```json
+{
+  "scripts": {
+    "build:wasm": "wasm-pack build crates/crdt --target web --release",
+    "build:web": "pnpm --filter web build",
+    "build": "pnpm run build:wasm && pnpm run build:web",
+    "deploy:web": "pnpm run build && wrangler pages deploy apps/web/dist"
+  }
+}
+```
+
+`--release` สำคัญตรงนี้: WASM แบบ debug ที่ module ก่อนหน้า build ไว้มันใหญ่และช้า release build จะตัดมันให้เล็กลง — นี่คือ binary ที่ user ของคุณจะ download
+
+### 2. `apps/web/astro.config.mjs` — static output at the site root
+
+PWA ถูกเสิร์ฟจาก **root** ของ domain ของตัวเอง ไม่ใช่ใต้ sub-path นั่นตั้งใจ: scope เริ่มต้นของ Service Worker คือ directory ที่มันถูกเสิร์ฟออกมา ดังนั้นการเสิร์ฟแอปที่ `/` ทำให้ `sw.js` คุม origin ทั้งหมดได้
+
+```js
+import { defineConfig } from 'astro/config';
+
+export default defineConfig({
+  // The PWA gets its own Pages domain, so no `base` — the SW controls the root scope.
+  site: 'https://offlinenotes.pages.dev',
+  output: 'static',
+  vite: {
+    // wasm-pack output is ESM; let Vite fingerprint and serve the .wasm as an asset.
+    assetsInclude: ['**/*.wasm'],
+  },
+});
+```
+
+### 3. `apps/web/public/sw.js` — cache the fingerprinted WASM
+
+นี่คือกับดักเรื่อง deployment ที่กัดทุกคนในครั้งแรก Astro **fingerprint** asset ที่ build แล้ว — CRDT ของคุณจะออกมาเป็นอะไรทำนอง `/_astro/crdt_bg.a1b2c3d4.wasm` และ hash เปลี่ยนทุก build `sw.js` ที่ precache list ของชื่อไฟล์แบบ *hard-code* จึงจะ cache WASM ใน production ไม่สำเร็จ และแอปจะตายทันทีที่มันออฟไลน์แล้วต้อง merge
+
+มีวิธีแก้ที่ตรงไปตรงมาสองทาง ทางหนึ่งคือ generate precache list ตอน build จาก build manifest ของ Astro หรือ — ง่ายกว่าและเป็นทางที่เราจะทำ — precache แค่ navigation shell ที่เสถียร แล้ว cache asset ที่ fingerprint แล้ว **ตอน runtime** แบบ cache-first ตอน fetch ครั้งแรกของมัน เพราะไฟล์ที่ fingerprint แล้ว immutable การ load ครั้งแรกตอนออนไลน์ก็เพียงพอที่จะทำให้มันพร้อมใช้ออฟไลน์ถาวร
+
+```js
+// apps/web/public/sw.js
+const SHELL = 'shell-v1';
+const RUNTIME = 'runtime-v1';
+
+// Stable, unfingerprinted entry points — safe to hard-code.
+const SHELL_URLS = ['/', '/index.html', '/manifest.webmanifest'];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_URLS)));
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) =>
+      Promise.all(
+        keys.filter((k) => k !== SHELL && k !== RUNTIME).map((k) => caches.delete(k)),
+      ),
+    ),
+  );
+  self.clients.claim();
+});
+
+self.addEventListener('fetch', (event) => {
+  const { request } = event;
+  const url = new URL(request.url);
+
+  // Never handle the sync API here — that's the network's job (and it's another origin).
+  if (url.origin !== self.location.origin) return;
+
+  // Cache-first for everything same-origin, including the fingerprinted /_astro/*.wasm.
+  event.respondWith(
+    caches.match(request).then((hit) => {
+      if (hit) return hit;
+      return fetch(request).then((res) => {
+        // Only cache successful, cacheable GETs.
+        if (request.method === 'GET' && res.ok) {
+          const copy = res.clone();
+          caches.open(RUNTIME).then((c) => c.put(request, copy));
+        }
+        return res;
+      });
+    }),
+  );
+});
+```
+
+นี่คือ cache-first strategy ตัวเดียวกับจาก Module 8 — deployment แค่ทำให้ผลของ *fingerprinting* เป็นรูปธรรมขึ้นเท่านั้น
+
+### 4. Keep `sw.js` and the manifest uncached by the CDN
+
+Service Worker ที่เบราว์เซอร์อัปเดตไม่ได้คือกับดัก บอก CDN ว่าอย่า cache `sw.js` (และ manifest) เลย เพื่อให้ deploy ใหม่ถูกหยิบไปใช้ บน Pages ไฟล์ `_headers` ใน `public/` จัดการให้:
+
+```
+# apps/web/public/_headers
+/sw.js
+  Cache-Control: no-cache
+/manifest.webmanifest
+  Cache-Control: no-cache
+```
+
+asset `/_astro/*` ที่ fingerprint แล้วเป็นตรงกันข้าม — มัน cache ได้ตลอดกาลอย่างปลอดภัย และ Pages ทำให้เองอัตโนมัติ
+
+### 5. Deploy
+
+login ครั้งเดียว แล้วส่งขึ้น:
+
+```sh
+npx wrangler login
+pnpm run deploy:web
+# → Deploying apps/web/dist to Cloudflare Pages…
+# → ✨ Deployment complete! https://offlinenotes.pages.dev
+```
+
+`wrangler pages deploy` ครั้งแรกจะเสนอสร้างโปรเจกต์ Pages ให้; ตอบรับแล้วตั้งชื่อว่า `offlinenotes`
+
+## Verify
+
+build แล้วตรวจ output ก่อน:
+
+```sh
+pnpm run build
+ls apps/web/dist/_astro | grep wasm
+# → crdt_bg.<hash>.wasm      ← the release CRDT is in the bundle
+ls apps/web/dist/sw.js apps/web/dist/manifest.webmanifest
+# → both present, copied verbatim from public/
+```
+
+จากนั้น deploy แล้วเช็คแอปตัวจริง:
+
+1. เปิด URL ที่ deploy แล้ว ใน DevTools **Application → Service Workers** ยืนยันว่า `sw.js` *activated and running*
+2. รัน **Lighthouse** (หรือ panel **Application → Manifest** ใน DevTools) แล้วยืนยันว่า check เรื่อง **installability** ผ่าน: เสิร์ฟผ่าน HTTPS, มี manifest ที่มี `name`, `start_url`, `display: standalone`, และ icon ขนาด 192px + 512px, และมี Service Worker ที่มี `fetch` handler ไอคอน install ควรปรากฏใน address bar
+3. load แอปครั้งหนึ่งตอนออนไลน์ แล้วติ๊ก **Application → Service Workers → Offline** (หรือ **Network → Offline**) แล้ว reload shell, WASM และ notes ของคุณต้องกลับมาครบ — การแก้ไขยังทำงานได้ เพราะการ merge รันในเครื่อง
+4. ส่งการเปลี่ยนแปลงแล้ว redeploy; ยืนยันว่าเบราว์เซอร์หยิบ `sw.js` ตัวใหม่ไปใช้ (เพราะคุณตั้ง `no-cache`) แทนที่จะเสิร์ฟ worker เก่าค้างตลอดไป
+
+คุณเสร็จเมื่อแอปติดตั้งลง dock/home screen ของคุณได้ และแก้ไข note ได้ตอนปิด network สนิท
+
+**ตรวจสอบความเข้าใจ:**
+
+1. ทำไม static CDN host จึงเป็นตัวที่ *เข้ากันตามธรรมชาติ* กับแอปนี้ ไม่ใช่การประนีประนอม — app server มีอะไรต้องทำตรงนี้บ้าง?
+2. Astro fingerprint CRDT เป็น `/_astro/crdt_bg.<hash>.wasm` ทำไม precache list แบบ hard-code จึงพังใน production และมีสองวิธีไหนที่จัดการมันได้?
+3. ทำไม `sw.js` เองต้องถูกเสิร์ฟด้วย `Cache-Control: no-cache` ในขณะที่ `/_astro/*` cache ได้ตลอดกาล?
+4. ทำไมแอปจึงเสิร์ฟจาก root ของ domain ของมัน แทนที่จะอยู่ใต้ sub-path เหมือน guide ที่คุณกำลังอ่านอยู่?
+
+## Recap
+
+คุณ build WASM binary แบบ release, รวมมันกับ Service Worker เข้าเป็น `dist/` แบบ static แล้ว deploy ไป Cloudflare Pages เป็น PWA ที่ติดตั้งได้และใช้ออฟไลน์ได้ — พร้อมจัดการกับดักเรื่อง fingerprinting ไว้แล้ว เพื่อให้ CRDT รอดตอนออฟไลน์ ตอนนี้แอป live แล้ว แต่มันยัง sync ได้กับตัวเองเท่านั้นจนกว่าจะมี server มา relay ops
+
+ต่อไป deploy server ตัวนั้น: [Deploy the sync server →](/offlinenotes/th/deployment/deploy-the-sync-server/)

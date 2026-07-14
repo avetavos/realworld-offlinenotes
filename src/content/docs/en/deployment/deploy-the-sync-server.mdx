@@ -1,0 +1,232 @@
+---
+title: Deploy the sync server
+description: "Deploy the Hono sync server to a Cloudflare Worker, swap the in-memory Map op log for a Durable Object (or KV), and point PUBLIC_SYNC_URL at it."
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+The sync server from Module 9 keeps every note's op log in an in-memory `Map<noteId, {seq, op}[]>`. That's perfect for `localhost` and fatal in production: a Worker is stateless between requests and gets torn down constantly, so the `Map` — and everyone's un-pulled ops — vanishes on the next cold start.
+
+In this lesson you'll:
+
+- deploy the Hono server to a **Cloudflare Worker**,
+- replace the `Map` with **durable, per-note storage** — a **Durable Object** (recommended) or **Workers KV**,
+- point the client's `PUBLIC_SYNC_URL` at the deployed Worker so two real devices can sync.
+
+The protocol does not change — still `POST /docs/:id/ops` and `GET /docs/:id/ops?since=`. Only where the op log *lives* changes.
+
+## Why
+
+The server is a **thin relay**: it never merges and never owns the truth (the CRDT and the clients do that). But it owns one thing that must survive restarts — the **append-only op log per note**, with a **monotonic server sequence number** so `?since=` can hand a device exactly the ops it hasn't seen. The `Map` gave us that seq for free in one process. On the edge there is no single process, so we need storage that is both **durable** and **correct under concurrent pushes**.
+
+That second requirement is the whole reason to think before reaching for the nearest key-value store. The seq is a counter that two devices may try to advance at the same instant. Get that wrong and two ops share a seq, or one overwrites the other — and a device silently never pulls an edit. So the choice of backing store is really a choice about *who guarantees the counter is monotonic*.
+
+## Pros & cons
+
+**Durable Object vs Workers KV for the op log**
+
+- **Durable Object — Pros:** A DO is a single, addressable, single-threaded actor. `idFromName(noteId)` gives you exactly one object per note, and its input gate serializes requests, so incrementing the seq and appending the op is **atomic without any locking you write**. Its storage is strongly consistent. This is the textbook fit for a per-key append log. **Cons:** One more concept (classes + migrations), and a note that's a global hotspot routes through one object.
+- **Workers KV — Pros:** Dead simple — a global key-value store, one binding, `get`/`put`/`list`. Great for read-heavy, rarely-conflicting data. **Cons:** KV is **eventually consistent** and has **no atomic increment**, so two concurrent pushes to the same note can race the seq counter and collide. Fine for a single-writer demo; wrong for the concurrent-offline-editing this whole course is about. We'll build the DO and show KV as the simpler-but-caveated alternative.
+
+**Sync as its own Worker vs folding it into the Pages app**
+
+- **Pros of a separate Worker:** The relay stays independent of the client — different origin, different lifecycle, deploy either without touching the other, and the "thin server" boundary stays honest. **Pros of folding it in** (Pages Functions): one deploy, one domain, no CORS.
+- **Cons:** Two deploys and a CORS config to maintain. We keep them separate because the architecture treats the server as swappable transport — it could become peer-to-peer later, and the client shouldn't care.
+
+## Set it up
+
+### 1. `apps/sync/src/index.ts` — the Hono app, routing to a Durable Object
+
+The Hono routes are unchanged; they just delegate to a per-note DO stub instead of a `Map` lookup. Note the typed `Bindings` so `c.env.OP_LOG` is the DO namespace.
+
+```ts
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import type { OpLog } from './op-log';
+
+// A CRDT op — the opaque shape produced by the WASM engine (see crates/crdt).
+type Op = unknown;
+
+type Bindings = {
+  OP_LOG: DurableObjectNamespace<OpLog>;
+};
+
+const app = new Hono<{ Bindings: Bindings }>();
+
+// Allow only the deployed PWA origin to call the relay.
+app.use('/*', cors({ origin: 'https://offlinenotes.pages.dev' }));
+
+// One Durable Object instance per note id.
+const logFor = (env: Bindings, id: string) =>
+  env.OP_LOG.get(env.OP_LOG.idFromName(id));
+
+app.post('/docs/:id/ops', async (c) => {
+  const { ops } = await c.req.json<{ ops: Op[] }>();
+  const head = await logFor(c.env, c.req.param('id')).append(ops);
+  return c.json({ head });
+});
+
+app.get('/docs/:id/ops', async (c) => {
+  const since = Number(c.req.query('since') ?? 0);
+  const result = await logFor(c.env, c.req.param('id')).since(since);
+  return c.json(result);
+});
+
+// Re-export the DO class so the runtime can instantiate it.
+export { OpLog } from './op-log';
+export default app;
+```
+
+Because the DO uses RPC (below), the Worker calls `stub.append(...)` and `stub.since(...)` as if they were local async methods — no hand-rolled `fetch` between Worker and object.
+
+### 2. `apps/sync/src/op-log.ts` — the `OpLog` Durable Object
+
+One object per note. It holds the `head` counter and every op, keyed by a zero-padded seq so lexical order equals numeric order — which makes "ops since N" a single prefix range read. Both methods run inside the DO's input gate, so the seq can't race.
+
+```ts
+import { DurableObject } from 'cloudflare:workers';
+
+type Op = unknown;
+type Entry = { seq: number; op: Op };
+
+const key = (seq: number) => 'op:' + String(seq).padStart(12, '0');
+
+export class OpLog extends DurableObject {
+  // Append each op with the next server seq; return the new head.
+  async append(ops: Op[]): Promise<number> {
+    let head = (await this.ctx.storage.get<number>('head')) ?? 0;
+    const batch: Record<string, Entry> = {};
+    for (const op of ops) {
+      head += 1;
+      batch[key(head)] = { seq: head, op };
+    }
+    await this.ctx.storage.put(batch);   // the ops
+    await this.ctx.storage.put('head', head); // then the head — same object, single-threaded
+    return head;
+  }
+
+  // Return ops with seq > since, plus the current head.
+  async since(since: number): Promise<{ ops: Entry[]; head: number }> {
+    const head = (await this.ctx.storage.get<number>('head')) ?? 0;
+    const map = await this.ctx.storage.list<Entry>({
+      prefix: 'op:',
+      startAfter: key(since),
+    });
+    return { ops: [...map.values()], head };
+  }
+}
+```
+
+This is the same append-only log with the same wire shape as Module 9 — the `Map` was just a non-durable stand-in for exactly this.
+
+### 3. `apps/sync/wrangler.jsonc` — bind the object and migrate
+
+The DO needs a binding *and* a migration that registers the class. `new_sqlite_classes` uses the current SQLite-backed storage, which is what `this.ctx.storage` reads and writes.
+
+```jsonc
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "offlinenotes-sync",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-14",
+  "durable_objects": {
+    "bindings": [
+      { "name": "OP_LOG", "class_name": "OpLog" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["OpLog"] }
+  ]
+}
+```
+
+### 4. The KV alternative (simpler, with the caveat)
+
+If you'd rather ship KV, create the namespace and bind it — but read the caveat first.
+
+```sh
+npx wrangler kv namespace create OPS
+# → add the printed id under kv_namespaces in wrangler.jsonc
+```
+
+```jsonc
+{
+  "kv_namespaces": [
+    { "binding": "OPS", "id": "<paste-the-id>" }
+  ]
+}
+```
+
+```ts
+// Storing the op log in KV: head under `head:<id>`, ops under `op:<id>:<paddedSeq>`.
+type Bindings = { OPS: KVNamespace };
+
+app.post('/docs/:id/ops', async (c) => {
+  const id = c.req.param('id');
+  const { ops } = await c.req.json<{ ops: Op[] }>();
+  let head = Number((await c.env.OPS.get(`head:${id}`)) ?? 0);
+  for (const op of ops) {
+    head += 1;
+    await c.env.OPS.put(`op:${id}:${String(head).padStart(12, '0')}`, JSON.stringify(op));
+  }
+  await c.env.OPS.put(`head:${id}`, String(head));
+  return c.json({ head });
+});
+```
+
+The read side lists keys under the `op:` prefix for that note and filters by seq. It works — but two devices pushing at the same moment can both read the same `head`, and one clobbers the other's seq. That's the eventual-consistency, no-atomic-increment cost. The Durable Object exists precisely to close that gap.
+
+### 5. Deploy, then point the client at it
+
+```sh
+cd apps/sync
+npx wrangler deploy
+# → Uploaded offlinenotes-sync
+# → https://offlinenotes-sync.<your-subdomain>.workers.dev
+```
+
+`PUBLIC_SYNC_URL` is a build-time public env var the client reads (default `http://localhost:8787`). Rebuild and redeploy the PWA with it set to the Worker URL:
+
+```sh
+PUBLIC_SYNC_URL=https://offlinenotes-sync.<your-subdomain>.workers.dev \
+  pnpm run deploy:web
+```
+
+## Verify
+
+Hit the deployed Worker directly first:
+
+```sh
+BASE=https://offlinenotes-sync.<your-subdomain>.workers.dev
+
+curl -X POST "$BASE/docs/demo/ops" -H 'content-type: application/json' \
+  -d '{"ops":[{"t":"title","value":"hello","ts":[1,"a"]}]}'
+# → {"head":1}
+
+curl "$BASE/docs/demo/ops?since=0"
+# → {"ops":[{"seq":1,"op":{"t":"title","value":"hello","ts":[1,"a"]}}],"head":1}
+```
+
+Then prove the thing the `Map` couldn't do:
+
+1. **Persistence:** run `npx wrangler deploy` again, then re-run the `GET`. The op is **still there** — Durable Object storage survives redeploys and cold starts, unlike the in-memory `Map`.
+2. **CORS:** confirm the response to a request from the Pages origin carries `Access-Control-Allow-Origin: https://offlinenotes.pages.dev`. A wrong or missing header is the classic "works in curl, fails in the app" bug.
+3. **End to end:** open the deployed PWA in two different browsers (or two devices). Edit a note offline in each, bring both online, and confirm each device pulls the other's ops and the text converges — the payoff from Module 12, now over the real network.
+4. `npx wrangler tail` streams live logs; watch the `POST`/`GET` hits as the two clients sync.
+
+You're done when a note edited on one device shows up on the other, and the op log survives a redeploy.
+
+**Check your understanding:**
+
+1. Why does the in-memory `Map` op log work on `localhost` but fail as soon as it's a Worker?
+2. The server never merges ops — so what *is* the one piece of correctness it must guarantee, and which store guarantees it for free?
+3. Why can two concurrent pushes race the seq counter on KV but not on a Durable Object?
+4. `PUBLIC_SYNC_URL` is baked in at build time. What has to happen for a client to start talking to the deployed server, and why isn't it a runtime setting?
+
+## Recap
+
+You moved the sync server off `localhost`: a Hono Worker relaying ops, backed by a per-note Durable Object that keeps the append-only log durable and its seq monotonic under concurrency — with KV shown as the simpler option and its race named honestly. With `PUBLIC_SYNC_URL` repointed, two real devices now sync conflict-free over the edge. OfflineNotes is fully deployed.
+
+Next, step back and take stock: [Wrap-up →](/offlinenotes/en/wrap-up/).
