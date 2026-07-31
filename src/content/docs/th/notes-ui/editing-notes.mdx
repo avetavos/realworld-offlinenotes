@@ -5,21 +5,21 @@ sidebar:
   order: 1
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
-เรามี storage layer แบบ typed แล้ว ตอนนี้เราวาง editor จริงไว้ด้านหน้ามัน บทนี้ทำให้ `<note-editor>` — custom element ที่วาง skeleton ไว้ตั้งแต่ [App Shell](/offlinenotes/th/app-shell/) — ทำงานได้จริง: สร้าง note, แก้ title กับ body, ลบมัน โดยทุกการเปลี่ยนแปลง persist ลง IndexedDB ผ่าน accessor จาก [Notes object stores](/offlinenotes/th/indexeddb/notes-object-stores/)
+เรามี storage layer แบบ typed แล้ว ตอนนี้เราวาง editor จริงไว้ด้านหน้า บทนี้ทำให้ `<note-editor>` — custom element ที่วาง skeleton ไว้ตั้งแต่ [App Shell](/offlinenotes/th/app-shell/) — ทำงานได้จริง: สร้าง note, แก้ title กับ body, ลบทิ้ง โดยทุกการเปลี่ยนแปลง persist ลง IndexedDB ผ่าน accessor จาก [Notes object stores](/offlinenotes/th/indexeddb/notes-object-stores/)
 
 บทนี้เป็น **pre-CRDT** โดยตั้งใจ ตอนนี้ title กับ body เป็น field ธรรมดา ไม่มี merge ไม่มี op log ไม่มี sync กลไกพวกนั้นจะมาใน [Wiring the WASM Core](/offlinenotes/th/wiring-wasm/) (Module 7) การสร้าง UI บน persistence ธรรมดาก่อน แปลว่า storage round-trip ถูกพิสูจน์แล้วและน่าเบื่อ ก่อนที่เราจะแนะนำส่วนที่ยาก
 
 มีการตัดสินใจเรื่อง shape หนึ่งที่ต้องพูดให้ชัดก่อน: store `notes` เก็บแค่ `{ id, title, updatedAt }` — เป็น projection สำหรับ list ไม่มี body ดังนั้นแม้ตอนนี้ **body ก็อยู่ใน snapshot ของ `docs`** (`{ id, actorId, snapshot }`) เป็น object `{ body }` ธรรมดา นี่ไม่ใช่งานเปล่าประโยชน์: Module 7 จะสลับ snapshot ธรรมดานี้เป็น CRDT snapshot จริง **ใน store เดียวกัน** ดังนั้นตำแหน่งที่ body อยู่ไม่ต้องเปลี่ยนเลย — เปลี่ยนแค่ว่า snapshot เก็บอะไรข้างใน
 
-## Why
+## ทำไม
 
-- **custom element ไม่ใช่ framework component** OfflineNotes เป็นแอป Web Components `<note-editor>` เป็น DOM element จริงที่มี lifecycle ของตัวเอง มันอ่านและเขียน storage ตรง ๆ (pre-CRDT) และจะอ่าน/เขียน note store (post-CRDT) โดยไม่เปลี่ยน public surface ของมัน
+- **custom element ไม่ใช่ framework component** OfflineNotes เป็นแอป Web Components `<note-editor>` เป็น DOM element จริงที่มี lifecycle ของตัวเอง อ่านและเขียน storage ตรง ๆ (pre-CRDT) และจะอ่าน/เขียน note store (post-CRDT) โดยไม่เปลี่ยน public surface ของตัวเอง
 - **persist ตอน edit ไม่ใช่ตอนกดปุ่ม Save** local-first แปลว่าการเขียนถูกและอยู่ในเครื่อง — ไม่มี network ให้รอ — โมเดลที่เป็นธรรมชาติคือ "note ของคุณถูกเซฟเสมอ" แบบเดียวกับแอป note บนเครื่อง เรา debounce เบา ๆ เพื่อเลี่ยงการเขียนทุกครั้งที่กดคีย์
 - **แยก projection ออกจาก body ตั้งแต่วันแรก** การเขียน `title`/`updatedAt` ลง `notes` และ body ลง snapshot ของ `docs` ตอนนี้ แปลว่า list ยังถูกอยู่ และการสลับ CRDT ใน Module 7 เป็นแค่การเปลี่ยน snapshot ไม่ใช่ data migration
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **Persist-on-input (debounced) vs. an explicit Save button**
 
@@ -31,7 +31,7 @@ sidebar:
 - **Pros:** ทำให้ projection `notes` เล็กมาก list จึงไม่ต้องโหลด body ของ note; ตรงกับการแยก authoritative/derived; CRDT (Module 7) หย่อนลง `docs` ได้ตรง ๆ โดยไม่ต้องเปลี่ยน schema
 - **Cons:** เขียนสอง store ต่อการเซฟหนึ่งครั้ง (projection + doc) และ title กับ body ของ note อยู่คนละ store — ความไม่สอดคล้องที่เราคุมด้วยการเขียนทั้งคู่พร้อมกันเสมอ
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `apps/web/src/notes.ts` — a small persistence helper
 
@@ -167,7 +167,7 @@ class NoteEditor extends HTMLElement {
 customElements.define('note-editor', NoteEditor);
 ```
 
-`window.setTimeout` คืนค่าเป็น number ใน browser (ไม่ใช่ `Timeout` ของ Node) ดังนั้น `#timer` จึงมี type สะอาด event `notes-changed` เป็น DOM `CustomEvent` ธรรมดาบน `document` — list จะฟังมันในบทถัดไป และตอนนี้มันไม่มีต้นทุนอะไร
+`window.setTimeout` คืนค่าเป็น number ใน browser (ไม่ใช่ `Timeout` ของ Node) ดังนั้น `#timer` จึงมี type สะอาด event `notes-changed` เป็น DOM `CustomEvent` ธรรมดาบน `document` — list จะฟังในบทถัดไป และตอนนี้ยังไม่มีต้นทุนอะไร
 
 ### 3. `apps/web/src/components/offline-notes-app.ts` — wire "New"
 
@@ -189,7 +189,7 @@ class OfflineNotesApp extends HTMLElement {
 customElements.define('offline-notes-app', OfflineNotesApp);
 ```
 
-## Verify
+## ตรวจสอบผล
 
 Type-check และ build:
 
@@ -215,16 +215,16 @@ console.log(n);                       // { id, title, updatedAt }
 console.log(await db.getDoc(n.id));   // { id, actorId, snapshot: { body: '…' } }
 ```
 
-Title อยู่ใน `notes`, body อยู่ใน snapshot ของ `docs`, id เดียวกัน — การแยกเป็นเรื่องจริงและมันรอด reload
+Title อยู่ใน `notes`, body อยู่ใน snapshot ของ `docs`, id เดียวกัน — การแยกเป็นเรื่องจริงและรอด reload
 
 **Check your understanding:**
 
 1. body ถูกเก็บใน snapshot ของ `docs` ไม่ใช่ใน store `notes` เพราะอะไร และการตัดสินใจนั้นช่วยประหยัดงาน CRDT ของ Module 7 อย่างไร?
 2. `#onEdit` debounce ก่อน persist อะไรจะพังถ้าคุณตัด debounce ออกแล้วเขียนทุกครั้งที่กดคีย์ และ worst-case data loss ที่ window 300 ms คือเท่าไหร่?
 3. `saveNote` เขียนสอง store ทุกครั้งที่เซฟ invariant ตัวไหนที่เรารับผิดชอบ ซึ่งการเขียน store เดียวจะให้เรามาฟรี ๆ?
-4. `<note-editor>` dispatch `notes-changed` แต่ยังไม่มีใครฟัง ทำไมถึง emit มันตอนนี้แทนที่จะเรียก list ตรง ๆ?
+4. `<note-editor>` dispatch `notes-changed` แต่ยังไม่มีใครฟัง ทำไมถึง emit ตั้งแต่ตอนนี้แทนที่จะเรียก list ตรง ๆ?
 
-## Recap
+## สรุป
 
 ตอนนี้ `<note-editor>` สร้าง แก้ไข และลบ note ที่ persist ลง IndexedDB ข้าม reload ได้ — title กับ body ธรรมดา ยังไม่มี CRDT title กับ `updatedAt` ไปที่ projection `notes`; body ไปกับ snapshot ของ `docs` ตรงตำแหน่งที่ CRDT snapshot จริงจะอยู่ใน Module 7 พอดี การอัปเกรดนั้นจึงไม่ต้องย้ายข้อมูลเลย edit จะ persist บน debounce เบา ๆ และ editor ประกาศการเปลี่ยนแปลงด้วย event `notes-changed`
 

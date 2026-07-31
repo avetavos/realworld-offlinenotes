@@ -1,32 +1,32 @@
 ---
 title: Overview
-description: "OfflineNotes คืออะไร, รายการฟีเจอร์ และแผนที่ที่โยงแต่ละ build module เข้ากับคอร์สใน Learn Hub ที่มันดัดแปลงมา"
+description: "OfflineNotes คืออะไร, รายการฟีเจอร์ และแผนที่ที่โยงแต่ละ build module เข้ากับคอร์สใน Learn Hub ที่ดัดแปลงมา"
 sidebar:
   order: 1
 ---
 
 ## What OfflineNotes is
 
-OfflineNotes คือ **แอปโน้ตที่มองเครือข่ายเป็นของเสริม** คุณเขียนโน้ต markdown แล้วมัน save ลง **IndexedDB** บนเครื่องคุณทันที และทุกอย่างยังทำงานต่อได้แม้ปิด Wi-Fi — ทั้งค้นหา แก้ไข สร้างใหม่ พอเน็ตกลับมา โน้ตของคุณจะ **sync ข้ามอุปกรณ์** และการแก้ไขที่คุณทำบนสองอุปกรณ์ตอนที่ทั้งคู่ offline จะ **merge กันโดยไม่มี conflict**
+OfflineNotes คือ **แอปโน้ตที่มองเครือข่ายเป็นของเสริม** คุณเขียนโน้ต markdown แล้ว save ลง **IndexedDB** บนเครื่องคุณทันที และทุกอย่างยังทำงานต่อได้แม้ปิด Wi-Fi — ทั้งค้นหา แก้ไข สร้างใหม่ พอเน็ตกลับมา โน้ตของคุณจะ **sync ข้ามอุปกรณ์** และการแก้ไขที่คุณทำบนสองอุปกรณ์ตอนที่ทั้งคู่ offline จะ **merge กันโดยไม่มี conflict**
 
-ท่อนสุดท้ายนั่นคือส่วนที่ยาก และเป็นเหตุผลที่โปรเจกต์นี้มีอยู่ แอปส่วนใหญ่เป็นแบบ **server-first**: server ถือความจริง, client เป็นแค่หน้าต่างมองเข้าไป และ "offline" คือ error state OfflineNotes เป็นแบบ **local-first**: *client* ถือความจริง, เครือข่ายเป็นแค่ความสะดวกเบื้องหลัง และการ offline คือกรณี *ปกติ* ไม่ใช่ความล้มเหลว การทำให้มันได้ผล — โดยเฉพาะการ merge การแก้ไขพร้อมกันจากหลายอุปกรณ์โดยไม่มีตัวกลางคอยตัดสิน — คือหน้าที่ของ **CRDT** (Conflict-free Replicated Data Type) และเป็นเหตุผลที่ merge engine เขียนด้วย **Rust แล้ว compile เป็น WASM**: มันคือ logic ที่ใช้ร่วมกัน ถูกต้อง และ portable ที่รันเหมือนกันในทุก client
+ท่อนสุดท้ายนั่นคือส่วนที่ยาก และเป็นเหตุผลที่โปรเจกต์นี้มีอยู่ แอปส่วนใหญ่เป็นแบบ **server-first**: server ถือความจริง, client เป็นแค่หน้าต่างมองเข้าไป และ "offline" คือ error state OfflineNotes เป็นแบบ **local-first**: *client* ถือความจริง, เครือข่ายเป็นแค่ความสะดวกเบื้องหลัง และการ offline คือกรณี *ปกติ* ไม่ใช่ความล้มเหลว การทำให้เรื่องนี้ได้ผล — โดยเฉพาะการ merge การแก้ไขพร้อมกันจากหลายอุปกรณ์โดยไม่มีตัวกลางคอยตัดสิน — คือหน้าที่ของ **CRDT** (Conflict-free Replicated Data Type) และเป็นเหตุผลที่ merge engine เขียนด้วย **Rust แล้ว compile เป็น WASM**: เพราะคือ logic ที่ใช้ร่วมกัน ถูกต้อง และ portable ที่รันเหมือนกันในทุก client
 
-จุดสำคัญของโปรเจกต์ไม่ใช่ตัวโน้ต — แต่คือ **local-first**: IndexedDB เป็น source of truth, WASM CRDT สำหรับ merge แบบ conflict-free, Service Worker สำหรับ offline ของจริง และ sync server บาง ๆ ที่ส่งต่อการเปลี่ยนแปลงโดยไม่ได้เป็นเจ้าของมัน
+จุดสำคัญของโปรเจกต์ไม่ใช่ตัวโน้ต — แต่คือ **local-first**: IndexedDB เป็น source of truth, WASM CRDT สำหรับ merge แบบ conflict-free, Service Worker สำหรับ offline ของจริง และ sync server บาง ๆ ที่ส่งต่อการเปลี่ยนแปลงโดยไม่ได้เป็นเจ้าของข้อมูล
 
-## The feature set
+## ฟีเจอร์ที่มี
 
 - **Offline-first** — สร้าง แก้ไข ลบ และเปิดดูโน้ต markdown ได้โดยไม่ต้องมีเครือข่ายเลย
-- **IndexedDB storage** — ทุกโน้ตและ change-log ในเครื่องของมัน persist อยู่บนอุปกรณ์
+- **IndexedDB storage** — ทุกโน้ตและ change-log ในเครื่อง persist อยู่บนอุปกรณ์
 - **Rust→WASM CRDT** — LWW register สำหรับ field ของโน้ต และ sequence CRDT สำหรับ body ช่วย merge การแก้ไขพร้อมกันแบบ conflict-free
 - **Installable PWA** — Service Worker precache app shell ไว้; OfflineNotes ติดตั้งและเปิดได้เหมือนแอป native
 - **Cross-device sync** — server บาง ๆ ส่งต่อ CRDT op ของแต่ละโน้ต; อุปกรณ์ push และ pull
 - **Background Sync** — การแก้ไขที่ทำตอน offline จะ sync อัตโนมัติทันทีที่คุณกลับมา online
 
-## The course map
+## แผนที่คอร์ส
 
 แต่ละ build module ดัดแปลงคอร์สใน Learn Hub มาเป็นส่วนหนึ่งของ OfflineNotes
 
-| Module | What you build | Learn Hub course it adapts |
+| โมดูล | สิ่งที่คุณสร้าง | คอร์สใน Learn Hub ที่อ้างอิง |
 | --- | --- | --- |
 | 1 · Setup & Tooling | Astro + TS + toolchain แบบ Rust→WASM | TypeScript / Rust |
 | 2 · App Shell | Astro shell และ Web Components ชุดแรก | Web Components / Astro |
@@ -42,7 +42,7 @@ OfflineNotes คือ **แอปโน้ตที่มองเครือ�
 | 12 · Conflict-free Merge | การ merge การแก้ไข offline พร้อมกัน | Rust / CRDTs |
 | 13 · Deployment | ปล่อย PWA และ sync server ขึ้น production | Docker / CI |
 
-## Verify
+## ตรวจสอบผล
 
 คุณพร้อมไปต่อเมื่อตอบสิ่งเหล่านี้ด้วยคำพูดของคุณเองได้:
 

@@ -5,9 +5,9 @@ sidebar:
   order: 2
 ---
 
-Service Worker ทำให้ OfflineNotes โหลด offline ได้ บทนี้ทำให้มัน **install ได้**: manifest บอก browser ว่านี่คือ app, `beforeinstallprompt` ที่ดักจับไว้ให้เราเสนอ install ในเงื่อนไขของเราเอง, และ DevTools Application panel ยืนยันว่าทุกอย่างทำงานได้โดยปิด network
+Service Worker ทำให้ OfflineNotes โหลด offline ได้ บทนี้ทำให้ **install ได้**: manifest บอก browser ว่านี่คือ app, `beforeinstallprompt` ที่ดักจับไว้ให้เราเสนอ install ในเงื่อนไขของเราเอง, และ DevTools Application panel ยืนยันว่าทุกอย่างทำงานได้โดยปิด network
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 สามชิ้นที่เปลี่ยน site ที่ cache ไว้ให้กลายเป็น app ที่ install แล้ว:
 
@@ -24,27 +24,27 @@ flowchart LR
     Prompt --> Choice["await userChoice"]
 ```
 
-## Why
+## ทำไม
 
-ความ install ได้คือ **contract ที่ browser บังคับใช้**: มันจะเสนอ install เฉพาะ site ที่มี manifest ถูกต้อง (พร้อม field และ icon ที่ต้องมี) *และ* มี Service Worker ที่ควบคุม page อยู่ เราทำครึ่งหลังไปแล้วบทที่แล้ว; manifest คือครึ่งแรก การทำให้เข้า contract ยังเป็น audit ที่มีประโยชน์ด้วย — ถ้า app install ได้ มันก็ offline ได้จริง เพราะ browser ตรวจแล้ว
+ความ install ได้คือ **contract ที่ browser บังคับใช้**: browser จะเสนอ install เฉพาะ site ที่มี manifest ถูกต้อง (พร้อม field และ icon ที่ต้องมี) *และ* มี Service Worker ที่ควบคุม page อยู่ เราทำครึ่งหลังไปแล้วบทที่แล้ว; manifest คือครึ่งแรก การทำให้เข้า contract ยังเป็น audit ที่มีประโยชน์ด้วย — ถ้า app install ได้ ก็แปลว่า offline ได้จริง เพราะ browser ตรวจแล้ว
 
-เราดัก `beforeinstallprompt` แทนที่จะปล่อยให้ browser แสดง default mini-infobar เพราะ **timing และ placement เป็นการตัดสินใจเชิง product** การยิง install prompt ทันทีที่ผู้มาเยือนครั้งแรก landing คือทางที่เร็วที่สุดที่จะโดนปัดทิ้งตลอดกาล การเรียก `preventDefault()` และเก็บ event ไว้ทำให้เราโผล่ install ตรงจุดที่มันสมเหตุสมผล — ข้าง ๆ คำใบ้ว่า "works offline" หลังจาก user ได้เขียน note จริง ๆ แล้ว — และ event ที่เก็บไว้ยัง trigger native prompt *ตัวจริง* ได้เมื่อพวกเขาคลิก
+เราดัก `beforeinstallprompt` แทนที่จะปล่อยให้ browser แสดง default mini-infobar เพราะ **timing และ placement เป็นการตัดสินใจเชิง product** การยิง install prompt ทันทีที่ผู้มาเยือนครั้งแรก landing คือทางที่เร็วที่สุดที่จะโดนปัดทิ้งตลอดกาล การเรียก `preventDefault()` และเก็บ event ไว้ทำให้เราโผล่ install ตรงจุดที่สมเหตุสมผล — ข้าง ๆ คำใบ้ว่า "works offline" หลังจาก user ได้เขียน note จริง ๆ แล้ว — และ event ที่เก็บไว้ยัง trigger native prompt *ตัวจริง* ได้เมื่อพวกเขาคลิก
 
-ข้อจำกัดที่ตรงไปตรงมา: `beforeinstallprompt` เป็น feature ของ Chromium และจะไม่ fire ในทุก browser (iOS Safari install ผ่าน Share sheet แทน) และมันจะ fire เฉพาะเมื่อเข้าเกณฑ์และ app ยังไม่ถูก install ดังนั้นปุ่มแบบกำหนดเองคือ progressive enhancement — มีเมื่อ platform เสนอให้ ไม่มีเมื่อมันไม่เสนอ ไม่เคยเป็น dependency ที่ขาดไม่ได้
+ข้อจำกัดที่ตรงไปตรงมา: `beforeinstallprompt` เป็น feature ของ Chromium และจะไม่ fire ในทุก browser (iOS Safari install ผ่าน Share sheet แทน) และจะ fire เฉพาะเมื่อเข้าเกณฑ์และ app ยังไม่ถูก install ดังนั้นปุ่มแบบกำหนดเองคือ progressive enhancement — มีเมื่อ platform เสนอให้ ไม่มีเมื่อ platform ไม่เสนอ ไม่เคยเป็น dependency ที่ขาดไม่ได้
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **ดัก `beforeinstallprompt` เพื่อทำปุ่มแบบกำหนดเอง เทียบกับ default prompt ของ browser**
 
-- **Pros:** คุณเลือกได้ว่าจะถามเมื่อไรและตรงไหน ผูกมันกับจังหวะที่ user เห็นคุณค่า และซ่อนมันได้เมื่อ install แล้ว — อัตราตอบรับสูงกว่า banner ที่โผล่มาโดยไม่มีใครขอมาก
+- **Pros:** คุณเลือกได้ว่าจะถามเมื่อไรและตรงไหน ผูกกับจังหวะที่ user เห็นคุณค่า และซ่อนได้เมื่อ install แล้ว — อัตราตอบรับสูงกว่า banner ที่โผล่มาโดยไม่มีใครขอมาก
 - **Cons:** Chromium-only; คุณต้องจัดการ browser ที่ event ไม่เคย fire และคุณเป็นเจ้าของ lifecycle ของปุ่มเอง (แสดง, ซ่อนตอน install, ซ่อนตอนปัด)
 
 **PWA ที่ install เป็น standalone เทียบกับการอยู่เป็น browser tab**
 
-- **Pros:** มี window และ icon ของตัวเอง ไม่มี address bar เปิดจาก home screen หรือ dock ได้ — มันรู้สึกเหมือน native notes app ที่ project นี้เลียนแบบอยู่
+- **Pros:** มี window และ icon ของตัวเอง ไม่มี address bar เปิดจาก home screen หรือ dock ได้ — ให้ความรู้สึกเหมือน native notes app ที่ project นี้เลียนแบบอยู่
 - **Cons:** user ต้อง opt in เพื่อ install, update ไหลผ่าน cache-versioning ของ Service Worker (ไม่ใช่ app store) และ standalone mode ซ่อน affordance ของ browser ที่ user บางคนพึ่งพา
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `apps/web/public/manifest.webmanifest`
 
@@ -75,7 +75,7 @@ flowchart LR
 
 ### 2. `apps/web/src/layouts/AppLayout.astro`
 
-link manifest และ set theme color ใน page head เพื่อให้ browser อ่านมันได้
+link manifest และ set theme color ใน page head เพื่อให้ browser อ่านได้
 
 ```astro
 <head>
@@ -140,7 +140,7 @@ const installBtn = document.querySelector<HTMLButtonElement>('#install');
 if (installBtn) wireInstallPrompt(installBtn);
 ```
 
-## Verify
+## ตรวจสอบผล
 
 ความ install ได้ต้องใช้ manifest และ Service Worker จริง จึงต้องทดสอบกับ build ไม่ใช่ dev server:
 
@@ -155,7 +155,7 @@ pnpm --filter web preview
 - **Service Workers** — worker อยู่ในสถานะ *activated*
 - คลิก install icon ใน address bar (หรือปุ่ม **Install** แบบกำหนดเองของคุณ); app เปิดใน standalone window ของตัวเอง
 
-ตอนนี้ยืนยันว่ามันเปิดได้โดยไม่มี network ใน DevTools → Network set throttle เป็น **Offline** แล้วเปิด app ที่ install แล้วใหม่ (หรือ reload):
+ตอนนี้ยืนยันว่าเปิดได้โดยไม่มี network ใน DevTools → Network set throttle เป็น **Offline** แล้วเปิด app ที่ install แล้วใหม่ (หรือ reload):
 
 ```text
 Network throttle: Offline
@@ -176,6 +176,6 @@ pnpm --filter web build
 3. ทำไมคุณถึงใช้ prompt event ที่เก็บไว้ซ้ำสำหรับความพยายาม install ครั้งที่สองไม่ได้?
 4. DevTools panel และ setting ใดที่ให้คุณพิสูจน์ว่า app ที่ *install แล้ว* เปิดได้โดยปิด network?
 
-## Recap
+## สรุป
 
-ตอนนี้ OfflineNotes เป็น PWA จริงแล้ว: manifest ประกาศว่ามันเป็น app, `beforeinstallprompt` ที่ดักจับไว้เสนอ install ในเงื่อนไขของเรา, และ Application panel ยืนยันว่ามัน install และเปิด offline ได้เต็มรูปแบบ ทั้ง client — data, code, และ shell — รันได้โดยไม่มี network สิ่งที่มันยังทำไม่ได้คือการ *แชร์* edit ระหว่าง device ต่อไป [The Sync Server →](/offlinenotes/th/sync-server/) สร้าง Hono backend แบบบางที่เก็บและ relay CRDT op ที่นั่งอยู่ใน outbox
+ตอนนี้ OfflineNotes เป็น PWA จริงแล้ว: manifest ประกาศว่านี่เป็น app, `beforeinstallprompt` ที่ดักจับไว้เสนอ install ในเงื่อนไขของเรา, และ Application panel ยืนยันว่า install และเปิด offline ได้เต็มรูปแบบ ทั้ง client — data, code, และ shell — รันได้โดยไม่มี network สิ่งที่ยังทำไม่ได้คือการ *แชร์* edit ระหว่าง device ต่อไป [The Sync Server →](/offlinenotes/th/sync-server/) สร้าง Hono backend แบบบางที่เก็บและ relay CRDT op ที่นั่งอยู่ใน outbox

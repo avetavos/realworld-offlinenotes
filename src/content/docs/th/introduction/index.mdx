@@ -5,11 +5,11 @@ sidebar:
   order: 0
 ---
 
-OfflineNotes คือ **แอปโน้ต markdown แบบ local-first** มันทำงาน **offline ได้เต็มรูปแบบ** — โน้ตอยู่ใน **IndexedDB**, UI เป็น **Web Components** บน shell ของ **Astro** และ **Service Worker** ทำให้มันเป็น PWA ที่ติดตั้งได้ พอคุณกลับมา online **CRDT engine แบบ Rust→WASM** จะ merge การแก้ไขพร้อมกันแบบ **conflict-free** และ **sync server บาง ๆ** คอยให้ทุกอุปกรณ์ตรงกัน
+OfflineNotes คือ **แอปโน้ต markdown แบบ local-first** ทำงาน **offline ได้เต็มรูปแบบ** — โน้ตอยู่ใน **IndexedDB**, UI เป็น **Web Components** บน shell ของ **Astro** และ **Service Worker** ทำให้เป็น PWA ที่ติดตั้งได้ พอคุณกลับมา online **CRDT engine แบบ Rust→WASM** จะ merge การแก้ไขพร้อมกันแบบ **conflict-free** และ **sync server บาง ๆ** คอยให้ทุกอุปกรณ์ตรงกัน
 
 บทนำนี้ปูฉากให้ก่อนที่คุณจะเขียนโค้ดสักบรรทัด:
 
-- [Overview](/offlinenotes/th/introduction/overview/) — OfflineNotes คืออะไร, รายการฟีเจอร์ และแผนที่ที่โยงแต่ละ module เข้ากับคอร์สใน Learn Hub ที่มันดัดแปลงมา
+- [Overview](/offlinenotes/th/introduction/overview/) — OfflineNotes คืออะไร, รายการฟีเจอร์ และแผนที่ที่โยงแต่ละ module เข้ากับคอร์สใน Learn Hub ที่ดัดแปลงมา
 - [Architecture](/offlinenotes/th/introduction/architecture/) — IndexedDB, WASM CRDT, Service Worker และ sync server ประกอบร่างกันอย่างไร และทำไม local-first ถึงจัดโครงสร้างแบบนี้
 - [Prerequisites](/offlinenotes/th/introduction/prerequisites/) — เครื่องมือที่ต้องติดตั้งก่อนเริ่ม Module 1
 - [Roadmap](/offlinenotes/th/introduction/roadmap/) — OfflineNotes อยู่ตรงไหนในซีรีส์ Real-World Projects

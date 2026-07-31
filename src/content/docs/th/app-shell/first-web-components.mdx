@@ -1,23 +1,23 @@
 ---
 title: First Web Components
-description: "นิยามโครง custom-element <note-list> และ <note-editor> แล้วประกอบมันเข้าไปใน <offline-notes-app> — โครงสร้างและ event ยังไม่มีข้อมูล"
+description: "นิยามโครง custom-element <note-list> และ <note-editor> แล้วประกอบเข้าไปใน <offline-notes-app> — โครงสร้างและ event ยังไม่มีข้อมูล"
 sidebar:
   order: 2
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
-custom elements สามตัวที่ประกอบเป็น notes UI ในรูป **โครง** `<note-list>` render แพเนล list พร้อมปุ่ม **New**; `<note-editor>` render input ชื่อและ textarea body แบบ markdown; และ `<offline-notes-app>` ประกอบมันเข้าเป็น layout สองแพเนล ตอนนี้ **ยังไม่มีข้อมูลและยังไม่มี persistence** — list ว่าง, editor แก้อะไรที่ไม่ได้ save สิ่งที่โครงเหล่านี้นิยามคือ **รูปร่างและ event** (`note-new`, `note-change`) ที่ module ต่อ ๆ ไปจะต่อสายเข้ากับ IndexedDB และ CRDT
+custom elements สามตัวที่ประกอบเป็น notes UI ในรูป **โครง** `<note-list>` render แพเนล list พร้อมปุ่ม **New**; `<note-editor>` render input ชื่อและ textarea body แบบ markdown; และ `<offline-notes-app>` ประกอบทั้งสองเข้าเป็น layout สองแพเนล ตอนนี้ **ยังไม่มีข้อมูลและยังไม่มี persistence** — list ว่าง, editor แก้อะไรที่ไม่ได้ save สิ่งที่โครงเหล่านี้นิยามคือ **รูปร่างและ event** (`note-new`, `note-change`) ที่ module ต่อ ๆ ไปจะต่อสายเข้ากับ IndexedDB และ CRDT
 
-## Why
+## ทำไม
 
-การทำให้ขอบเขต component และ event contract ของมันถูกต้อง *ก่อน* ที่ข้อมูลจะไหลผ่าน คือจุดสำคัญทั้งหมดของบทนี้ พอ IndexedDB และ WASM engine มาถึง element เหล่านี้ไม่ควรต้องรื้อโครงสร้าง — แค่ handler ของมันได้เนื้อใน เราจึงตกลงสามเรื่องตอนนี้:
+การทำให้ขอบเขต component และ event contract ให้ถูกต้อง *ก่อน* ที่ข้อมูลจะไหลผ่าน คือจุดสำคัญทั้งหมดของบทนี้ พอ IndexedDB และ WASM engine มาถึง element เหล่านี้ไม่ควรต้องรื้อโครงสร้าง — แค่ handler ได้เนื้อในเพิ่ม เราจึงตกลงสามเรื่องตอนนี้:
 
 - **custom elements ไม่ใช่ framework** UI เล็กและอยู่ยาว; component model ของ web platform เอง (custom elements) หมายความว่าไม่มี framework runtime ให้ต้องส่ง, cache หรือเก็บไว้ใช้ offline และทุกชิ้นใช้ lifecycle `connectedCallback` เดียวกับ root
-- **light DOM ไม่ใช่ shadow DOM** component เหล่านี้ render ลงใน light DOM เพื่อให้ global CSS ของ layout style มันได้ตรง ๆ และบทถัด ๆ ไป query ข้ามมันได้ง่าย การ encapsulate ของ shadow DOM จะเสียมากกว่าได้ที่สเกลนี้ — เป็น tradeoff ที่เราเลือกอย่างตั้งใจ
-- **สื่อสารด้วย event** โครง `<note-list>` ไม่รู้ว่า note *คือ* อะไร; มันแค่ fire event `note-new` แบบ bubble parent (สุดท้ายคือ note store) ตัดสินว่ามันหมายความว่าอะไร นี่ทำให้ component แยกตัวออกจาก data model ที่ยังไม่มี
+- **light DOM ไม่ใช่ shadow DOM** component เหล่านี้ render ลงใน light DOM เพื่อให้ global CSS ของ layout style ได้ตรง ๆ และบทถัด ๆ ไป query ข้ามได้ง่าย การ encapsulate ของ shadow DOM จะเสียมากกว่าได้ที่สเกลนี้ — เป็น tradeoff ที่เราเลือกอย่างตั้งใจ
+- **สื่อสารด้วย event** โครง `<note-list>` ไม่รู้ว่า note *คือ* อะไร; แค่ fire event `note-new` แบบ bubble แล้ว parent (สุดท้ายคือ note store) ตัดสินว่าหมายความว่าอะไร นี่ทำให้ component แยกตัวออกจาก data model ที่ยังไม่มี
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **vanilla custom elements เทียบกับ component framework (React, Lit)**
 
@@ -29,11 +29,11 @@ custom elements สามตัวที่ประกอบเป็น notes 
 - **Pros:** global CSS จาก layout apply ได้ตรง ๆ; การ query ข้าม component และ form ทำงานตามปกติ; inspect และ debug ง่ายกว่า
 - **Cons:** ไม่มีการ encapsulate style/DOM — global selector หลงทางเข้ามารั่วได้; คุณต้องมีวินัยกับชื่อ class เพื่อเลี่ยงการชนกัน
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `apps/web/src/scripts/note-list.ts`
 
-โครงแพเนล list มัน render header ที่มีปุ่ม **New** และ `<ul>` เปล่า การคลิก **New** dispatch event `note-new` แบบ bubble — parent จะจัดการเรื่องสร้าง note ภายหลัง; component แค่ประกาศเจตนา
+โครงแพเนล list render header ที่มีปุ่ม **New** และ `<ul>` เปล่า การคลิก **New** dispatch event `note-new` แบบ bubble — parent จะจัดการเรื่องสร้าง note ภายหลัง; component แค่ประกาศเจตนา
 
 ```ts
 export class NoteList extends HTMLElement {
@@ -84,7 +84,7 @@ customElements.define('note-editor', NoteEditor);
 
 ### 3. `apps/web/src/scripts/offline-notes-app.ts` — compose the panes
 
-อัปเดต root element ให้ render สอง component เคียงข้างกัน การ import module ของมันไว้ด้านบนรับประกันว่า `<note-list>` และ `<note-editor>` ถูกนิยามก่อนที่ root จะ render มัน
+อัปเดต root element ให้ render สอง component เคียงข้างกัน การ import module ทั้งสองไว้ด้านบนรับประกันว่า `<note-list>` และ `<note-editor>` ถูกนิยามก่อนที่ root จะ render
 
 ```ts
 import './note-list.ts';
@@ -145,7 +145,7 @@ note-editor .note-body {
 
 การ style selector `note-list` / `note-editor` เปล่า ๆ ใช้ได้เพราะ custom elements เป็น element ธรรมดาใน light DOM
 
-## Verify
+## ตรวจสอบผล
 
 รัน dev server จาก root ของ repo:
 
@@ -153,7 +153,7 @@ note-editor .note-body {
 pnpm dev
 ```
 
-เปิด `http://localhost:4321/` คุณควรเห็น layout **สองแพเนล**: sidebar "Notes" พร้อมปุ่ม **New** ทางซ้าย และ input ชื่อเหนือ textarea body ทางขวา พิมพ์ในช่องใดก็ได้ — มันรับ input ได้อิสระ (ยังไม่มีอะไร save; นั่นคือสิ่งที่คาดไว้)
+เปิด `http://localhost:4321/` คุณควรเห็น layout **สองแพเนล**: sidebar "Notes" พร้อมปุ่ม **New** ทางซ้าย และ input ชื่อเหนือ textarea body ทางขวา พิมพ์ในช่องใดก็ได้ — ช่องรับ input ได้อิสระ (ยังไม่มีอะไร save; นั่นคือสิ่งที่คาดไว้)
 
 ยืนยันว่า event fire ใน DevTools → **Console** ผูก listener เร็ว ๆ แล้วคลิก **New** และพิมพ์ใน editor:
 
@@ -181,12 +181,12 @@ pnpm build
 **Check your understanding:**
 
 1. `<note-list>` fire `note-new` แต่ไม่เคยสร้าง note ทำไมนั่นถึงเป็นจุดที่ *ถูกต้อง* ที่จะหยุด และใครจะเป็นคนจัดการ event ในที่สุด?
-2. ทำไม `offline-notes-app.ts` ถึง `import` module ของ list และ editor ไว้ด้านบน แทนที่จะพึ่งให้หน้าเป็นคน load มัน?
-3. เราเลือก light DOM แทน shadow DOM เราได้อะไรมาสำหรับการ style และ query และมันต้องแลกด้วยวินัยอะไร?
+2. ทำไม `offline-notes-app.ts` ถึง `import` module ของ list และ editor ไว้ด้านบน แทนที่จะพึ่งให้หน้าเป็นคน load?
+3. เราเลือก light DOM แทน shadow DOM เราได้อะไรมาสำหรับการ style และ query และต้องแลกด้วยวินัยอะไร?
 4. component emit custom event แบบ **bubble** ทำไม bubble ถึงสำคัญต่อวิธีที่ root (และภายหลังคือ note store) listen?
 
-## Recap
+## สรุป
 
-notes UI มีโครงสร้างแล้ว: `<note-list>` และ `<note-editor>` ถูกนิยาม, `<offline-notes-app>` ประกอบมันเข้าเป็น shell สองแพเนล และมันพูด event contract `note-new` / `note-change` ที่ module ต่อ ๆ ไปจะเชื่อมเข้ากับข้อมูลจริง ยังไม่มี persistence — แค่โครงที่สะอาดและแยกตัวออกจากกัน
+notes UI มีโครงสร้างแล้ว: `<note-list>` และ `<note-editor>` ถูกนิยาม, `<offline-notes-app>` ประกอบทั้งสองเข้าเป็น shell สองแพเนล และพูด event contract `note-new` / `note-change` ที่ module ต่อ ๆ ไปจะเชื่อมเข้ากับข้อมูลจริง ยังไม่มี persistence — แค่โครงที่สะอาดและแยกตัวออกจากกัน
 
 นั่นจบ App Shell ต่อไป ให้ component เหล่านี้มีอะไรให้อ่านและเขียน: typed IndexedDB store ที่กลายเป็น source of truth ของ client: [IndexedDB Foundation →](/offlinenotes/th/indexeddb/)

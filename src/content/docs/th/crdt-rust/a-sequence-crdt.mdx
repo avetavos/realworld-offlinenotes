@@ -5,21 +5,21 @@ sidebar:
   order: 2
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 [LWW register](/offlinenotes/th/crdt-rust/lww-register/) จัดการ title ด้วยการเก็บผู้ชนะเดียว body ทำแบบนั้นไม่ได้ — ถ้าคุณพิมพ์ "Hello" บนโทรศัพท์และ "World" บน laptop ตอนที่ทั้งคู่ offline คุณต้องการ **ทั้งคู่** ในลำดับที่สมเหตุสมผล บนทุกเครื่อง นั่นคือ **sequence CRDT** และเราจะสร้างตัว classic: **RGA** (Replicated Growable Array)
 
-บทนี้เพิ่ม `Rga` เข้า `NoteDoc` และ implement `insert_text`, `delete_text`, `text` และ branch `Insert`/`Delete` ของ `merge` ตามสัญญาเป๊ะ ทุกตัวอักษรได้ id `(counter, actor)` ที่ไม่ซ้ำ; การ insert ตั้งชื่อ element ที่มันวาง *ต่อจาก*; การ delete ทิ้ง **tombstone** ไว้; และกฎ ordering แบบ deterministic ทำให้ทั้งหมด converge ไม่ว่า op จะมาถึงลำดับใด เราจะจบด้วยการพิสูจน์ *ทำไม* มันจึง commutative, associative และ idempotent — และบอกตรง ๆ ว่าเวอร์ชันสร้างมือนี้หยุดตรงไหน
+บทนี้เพิ่ม `Rga` เข้า `NoteDoc` และ implement `insert_text`, `delete_text`, `text` และ branch `Insert`/`Delete` ของ `merge` ตามสัญญาเป๊ะ ทุกตัวอักษรได้ id `(counter, actor)` ที่ไม่ซ้ำ; การ insert ตั้งชื่อ element ที่วาง *ต่อจาก*; การ delete ทิ้ง **tombstone** ไว้; และกฎ ordering แบบ deterministic ทำให้ทั้งหมด converge ไม่ว่า op จะมาถึงลำดับใด เราจะจบด้วยการพิสูจน์ *ทำไม* จึง commutative, associative และ idempotent — และบอกตรง ๆ ว่าเวอร์ชันสร้างมือนี้หยุดตรงไหน
 
-## Why
+## ทำไม
 
 ไอเดียไร้เดียงสา — "insert ที่ index 5" — พังทันทีที่สองคนแก้พร้อมกัน ถ้าฉัน insert ที่ index 5 และคุณ delete index 2 "5" ของฉันตอนนี้ชี้ไปตัวอักษรผิดบน replica ของคุณ **index ไม่เสถียรข้ามการแก้พร้อมกัน** ตำแหน่งต้องถูกตั้งชื่อด้วยอะไรที่ไม่ขยับ
 
-RGA ตั้งชื่อทุกตัวอักษรด้วย **id ที่ไม่เปลี่ยน** และบันทึก **ว่ามันถูก insert ต่อจากอะไร** ไม่ใช่ตรงไหน การ insert คือ "วางตัวอักษร `X` ที่มี id `(7, "A")` ต่อจาก element ที่มี id `(3, "B")` ทันที" anchor นั้นไม่เคยเปลี่ยน ดังนั้น op หมายความเหมือนเดิมบนทุก replica ไม่ว่ามันจะมาถึงเมื่อไหร่ สองคน insert ต่อจาก anchor *เดียวกัน* คือการชิงกันจริง ๆ เพียงกรณีเดียว และ RGA ตัดสินมันด้วยกฎตายตัว: ในบรรดา sibling ที่แชร์ anchor **เรียงตาม id จากมากไปน้อย** (id ใหม่กว่าก่อน) เพราะ id ไม่ซ้ำทั่วโลกและ order สมบูรณ์ ทุก replica sort sibling เหล่านั้นเหมือนกัน — ทุกคนจึงจบด้วย string เดียวกัน
+RGA ตั้งชื่อทุกตัวอักษรด้วย **id ที่ไม่เปลี่ยน** และบันทึก **ว่า insert ต่อจากอะไร** ไม่ใช่ตรงไหน การ insert คือ "วางตัวอักษร `X` ที่มี id `(7, "A")` ต่อจาก element ที่มี id `(3, "B")` ทันที" anchor นั้นไม่เคยเปลี่ยน ดังนั้น op หมายความเหมือนเดิมบนทุก replica ไม่ว่าจะมาถึงเมื่อไหร่ สองคน insert ต่อจาก anchor *เดียวกัน* คือการชิงกันจริง ๆ เพียงกรณีเดียว และ RGA ตัดสินด้วยกฎตายตัว: ในบรรดา sibling ที่แชร์ anchor **เรียงตาม id จากมากไปน้อย** (id ใหม่กว่าก่อน) เพราะ id ไม่ซ้ำทั่วโลกและ order สมบูรณ์ ทุก replica sort sibling เหล่านั้นเหมือนกัน — ทุกคนจึงจบด้วย string เดียวกัน
 
-การ delete เป็นอีกความละเอียดอ่อน คุณลบ element จริง ๆ ไม่ได้ เพราะ insert ที่พร้อมกันอาจ anchor อยู่กับมัน — ลบมันแล้ว anchor จะห้อยเคว้ง ดังนั้น delete แค่พลิก flag **tombstone**; element ยังอยู่เป็น anchor point แต่หยุดแสดงใน text นั่นคือสิ่งที่ทำให้ delete commute กับทุกอย่าง
+การ delete เป็นอีกความละเอียดอ่อน คุณลบ element จริง ๆ ไม่ได้ เพราะ insert ที่พร้อมกันอาจ anchor อยู่กับ element นั้น — ลบทิ้งแล้ว anchor จะห้อยเคว้ง ดังนั้น delete แค่พลิก flag **tombstone**; element ยังอยู่เป็น anchor point แต่หยุดแสดงใน text นั่นคือสิ่งที่ทำให้ delete commute กับทุกอย่าง
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **RGA (insert-after + tombstones) vs storing the body as an LWW string**
 - **Pros:** insert ที่พร้อมกัน *ทั้งคู่* รอดในลำดับ deterministic; ไม่มี edit ไหนหายเงียบ ๆ นี่คือผลตอบแทนจริงของแนวทาง CRDT ทั้งหมด
@@ -29,7 +29,7 @@ RGA ตั้งชื่อทุกตัวอักษรด้วย **id �
 - **Pros:** element ที่ยังเป็น insert-anchor ของใครอยู่ก็ยัง valid; delete กลายเป็นการพลิก flag ที่ง่าย, idempotent และ commute กับทุก op
 - **Cons:** tombstone **สะสมไปเรื่อย ๆ** ถ้าไม่ compaction — note ที่แก้หนักมี memory โตตาม *ประวัติ edit ทั้งหมด* ไม่ใช่ความยาวปัจจุบัน การตั้งชื่อต้นทุนนี้คือ caveat ตรง ๆ ด้านล่าง
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `crates/crdt/src/lib.rs` — the RGA element and container
 
@@ -114,7 +114,7 @@ impl Rga {
 
 ### 3. `insert_text`, `delete_text`, `text` on `NoteDoc`
 
-`insert_text` แปลง `index` ที่มองเห็นเป็น anchor id แล้วสร้าง id ใหม่ต่อตัวอักษร โดยผูกแต่ละตัวอักษรใหม่เป็น anchor ของตัวถัดไป ดังนั้น paste หลายตัวอักษรจึงอยู่ในลำดับ มันคืน batch ของ `Insert` op `delete_text` resolve range ที่มองเห็นเป็น id แล้ว tombstone มัน คืน `Delete` op ทั้งคู่คืน shape `Op[]` เป๊ะที่แอปเก็บและ sync
+`insert_text` แปลง `index` ที่มองเห็นเป็น anchor id แล้วสร้าง id ใหม่ต่อตัวอักษร โดยผูกแต่ละตัวอักษรใหม่เป็น anchor ของตัวถัดไป ดังนั้น paste หลายตัวอักษรจึงอยู่ในลำดับ แล้วคืน batch ของ `Insert` op `delete_text` resolve range ที่มองเห็นเป็น id แล้ว tombstone ทิ้ง คืน `Delete` op ทั้งคู่คืน shape `Op[]` เป๊ะที่แอปเก็บและ sync
 
 ```rust
 use wasm_bindgen::prelude::*;
@@ -156,7 +156,7 @@ impl NoteDoc {
 
 ### 4. Extend `merge` with the `Insert`/`Delete` branches
 
-`merge` จากบทที่แล้วได้เพิ่มสอง arm `Insert` ที่เข้ามาเลื่อน Lamport clock แล้ว integrate element; `Delete` tombstone ด้วย id handler ทั้งคู่ idempotent และผลของมันไม่ขึ้นกับลำดับ — ดังนั้น batch จะมาถึงแบบสลับ, ซ้ำ หรือแทรกกับ local edit ก็ได้ และ body ยัง converge
+`merge` จากบทที่แล้วได้เพิ่มสอง arm `Insert` ที่เข้ามาเลื่อน Lamport clock แล้ว integrate element; `Delete` tombstone ด้วย id handler ทั้งคู่ idempotent และผลลัพธ์ไม่ขึ้นกับลำดับ — ดังนั้น batch จะมาถึงแบบสลับ, ซ้ำ หรือแทรกกับ local edit ก็ได้ และ body ยัง converge
 
 ```rust
 // inside the existing `for op in ops { match op { ... } }`
@@ -173,15 +173,15 @@ Op::Delete { id } => {
 
 สาม property และแต่ละตัวมาจากไหน:
 
-- **Idempotent** — `integrate` เพิกเฉย id ที่มันมีอยู่แล้ว; `tombstone` set flag ที่เป็น `true` อยู่แล้วหรือกำลังจะเป็น การ apply op เดิมสองครั้งเท่ากับ apply ครั้งเดียว ดังนั้นการส่งซ้ำ (sync server *จะ* redeliver) ไม่เป็นอันตราย
-- **Commutative** — slot สุดท้ายของ element ถูกตรึงด้วย anchor `after` และ tie-break id-จากมากไปน้อย ซึ่งไม่มีตัวไหนขึ้นกับ *เมื่อไหร่* ที่มัน integrate tombstone แค่พลิก flag ดังนั้นลำดับ op เปลี่ยนผลไม่ได้
-- **Associative** — ด้วยเหตุผลเดียวกัน มันไม่สำคัญว่าคุณ *จัดกลุ่ม* การ merge อย่างไร (batch จากเครื่อง B แล้ว C กับ C แล้ว B) ทุกการจัดกลุ่มไปถึง sequence เดียวกัน
+- **Idempotent** — `integrate` เพิกเฉย id ที่มีอยู่แล้ว; `tombstone` set flag ที่เป็น `true` อยู่แล้วหรือกำลังจะเป็น การ apply op เดิมสองครั้งเท่ากับ apply ครั้งเดียว ดังนั้นการส่งซ้ำ (sync server *จะ* redeliver) ไม่เป็นอันตราย
+- **Commutative** — slot สุดท้ายของ element ถูกตรึงด้วย anchor `after` และ tie-break id-จากมากไปน้อย ซึ่งไม่มีตัวไหนขึ้นกับ *เมื่อไหร่* ที่ integrate tombstone แค่พลิก flag ดังนั้นลำดับ op เปลี่ยนผลไม่ได้
+- **Associative** — ด้วยเหตุผลเดียวกัน ไม่สำคัญว่าคุณ *จัดกลุ่ม* การ merge อย่างไร (batch จากเครื่อง B แล้ว C กับ C แล้ว B) ทุกการจัดกลุ่มไปถึง sequence เดียวกัน
 
-รวมกัน: replica ใดก็ตามที่เห็น **set** ของ op เดียวกันแสดง `text()` เดียวกัน นั่นคือ convergence — property ที่ทั้ง architecture ยืนอยู่บนมัน
+รวมกัน: replica ใดก็ตามที่เห็น **set** ของ op เดียวกันแสดง `text()` เดียวกัน นั่นคือ convergence — property ที่ architecture ทั้งหมดยืนอยู่บนนั้น
 
 **caveat ตรง ๆ** นี่คือ RGA เพื่อ *สอน* แอป production ใช้ [Automerge](https://automerge.org/) หรือ [Yjs](https://yjs.dev/) ซึ่งจัดการขอบยาก ๆ ที่เรากลบไว้ — conflict case ที่รวยกว่า, encoding ที่มีประสิทธิภาพ และสำคัญที่สุดคือ **compaction** tombstone ของเราไม่เคยหายไป: ลบพันตัวอักษรแล้วพัน tombstone อยู่ใน `Vec` ตลอดกาล ดังนั้น memory ตามจำนวน edit ทั้งหมด ไม่ใช่ความยาวปัจจุบัน library CRDT จริง garbage-collect tombstone เมื่อทุก replica เห็น delete แล้ว เราไม่ทำ — และนั่นคือขีดจำกัดที่ตั้งใจซึ่งคุณควรบอกชื่อได้ ไม่ใช่ bug ที่คุณพลาด
 
-## Verify
+## ตรวจสอบผล
 
 Build crate:
 
@@ -236,17 +236,17 @@ test tests::bodies_converge_and_merge_is_idempotent ... ok
 test result: ok. 1 passed; 0 failed
 ```
 
-(หมายเหตุเรื่อง ordering: delete ที่มาถึงก่อน insert ที่มันเล็งไว้ หรือ insert ที่มาก่อน anchor ของมัน เป็นไปได้เฉพาะเมื่อ op ถูกส่งผิดลำดับ causal sync server ของเราเก็บ log แบบ **append-only และเรียงลำดับ** ต่อ note ดังนั้น anchor มาก่อน op ที่อ้างถึงมันเสมอ — สมมติฐานที่ fallback ของ `integrate` พึ่งพา CRDT production จะ buffer op ที่มาก่อนไว้จนกว่า dependency ของมันจะมาถึงแทน)
+(หมายเหตุเรื่อง ordering: delete ที่มาถึงก่อน insert ที่เล็งไว้ หรือ insert ที่มาก่อน anchor ของตัวเอง เป็นไปได้เฉพาะเมื่อ op ถูกส่งผิดลำดับ causal sync server ของเราเก็บ log แบบ **append-only และเรียงลำดับ** ต่อ note ดังนั้น anchor มาก่อน op ที่อ้างถึงเสมอ — สมมติฐานที่ fallback ของ `integrate` พึ่งพา CRDT production จะ buffer op ที่มาก่อนไว้จนกว่า dependency จะมาถึงแทน)
 
 **Check your understanding:**
 
-1. ทำไม RGA anchor การ insert ไว้กับ *สิ่งที่มันมาต่อจาก* แทนที่จะเป็น numeric index?
-2. สองเครื่อง insert ตัวอักษรต่างกันต่อจาก anchor เดียวกัน กฎอะไรตัดสินลำดับ และทำไมทุก replica เห็นด้วยกับมัน?
+1. ทำไม RGA anchor การ insert ไว้กับ *สิ่งที่มาต่อจาก* แทนที่จะเป็น numeric index?
+2. สองเครื่อง insert ตัวอักษรต่างกันต่อจาก anchor เดียวกัน กฎอะไรตัดสินลำดับ และทำไมทุก replica เห็นตรงกัน?
 3. ทำไมการ delete จึงทิ้ง tombstone ไว้แทนที่จะลบ element ทิ้งเลย?
-4. บอกชื่อต้นทุนเฉพาะที่ RGA สร้างมือนี้จ่าย ซึ่ง Automerge/Yjs เลี่ยงได้ และอะไรแก้มัน
+4. บอกชื่อต้นทุนเฉพาะที่ RGA สร้างมือนี้จ่าย ซึ่ง Automerge/Yjs เลี่ยงได้ และอะไรแก้เรื่องนี้
 
-## Recap
+## สรุป
 
-เราสร้าง RGA สำหรับ body: ตัวอักษรแบก id `(counter, actor)` ที่ไม่เปลี่ยน, การ insert ตั้งชื่อ anchor ของมัน, การ delete ทิ้ง tombstone และ tie-break id-จากมากไปน้อยให้ทุก replica มี order เดียวกัน นั่นคือ `insert_text`, `delete_text`, `text` และ branch `Insert`/`Delete` ของ `merge` — ทั้งหมดในรูปแบบ `Op` แบบ batch ที่แอปแชร์ เพราะ integrate และ tombstone เป็น idempotent และไม่ขึ้นกับลำดับ merge จึง commutative, associative และ idempotent replica จึง converge และเราตั้งชื่อขีดจำกัดตรง ๆ ไว้แล้ว: tombstone โตขึ้นโดยไม่มี compaction ที่ library จริงมีให้
+เราสร้าง RGA สำหรับ body: ตัวอักษรแบก id `(counter, actor)` ที่ไม่เปลี่ยน, การ insert ตั้งชื่อ anchor ของตัวเอง, การ delete ทิ้ง tombstone และ tie-break id-จากมากไปน้อยให้ทุก replica มี order เดียวกัน นั่นคือ `insert_text`, `delete_text`, `text` และ branch `Insert`/`Delete` ของ `merge` — ทั้งหมดในรูปแบบ `Op` แบบ batch ที่แอปแชร์ เพราะ integrate และ tombstone เป็น idempotent และไม่ขึ้นกับลำดับ merge จึง commutative, associative และ idempotent replica จึง converge และเราตั้งชื่อขีดจำกัดตรง ๆ ไว้แล้ว: tombstone โตขึ้นโดยไม่มี compaction ที่ library จริงมีให้
 
-CRDT engine ครบแล้ว — `NoteDoc` เปลี่ยน edit เป็น op และ merge op กลับ ต่อไปเราต่อสายมันเข้า note store ให้ local edit ไหลผ่าน WASM core เข้า IndexedDB: [Wiring the WASM Core →](/offlinenotes/th/wiring-wasm/)
+CRDT engine ครบแล้ว — `NoteDoc` เปลี่ยน edit เป็น op และ merge op กลับ ต่อไปเราต่อสายเข้า note store ให้ local edit ไหลผ่าน WASM core เข้า IndexedDB: [Wiring the WASM Core →](/offlinenotes/th/wiring-wasm/)

@@ -7,11 +7,11 @@ sidebar:
 
 คุณสร้าง CRDT ไว้แล้วใน [A CRDT in Rust →](/offlinenotes/th/crdt-rust/) และสร้าง store แบบ typed ไว้ใน [IndexedDB Foundation →](/offlinenotes/th/indexeddb/) บทนี้เชื่อมสองสิ่งนั้นเข้าด้วยกัน: note store boot WASM module ขึ้นมา ถือ `NoteDoc` ที่ยังมีชีวิตอยู่ แล้วแปลงทุกการกดคีย์ให้เป็น **op**
 
-## What we're building
+## สิ่งที่จะสร้าง
 
-note store (`store.ts`) ที่เป็นเจ้าของ WASM CRDT สำหรับ note ที่เปิดอยู่ มันเปิด edit method ให้สามตัว — `setTitle`, `insertText`, `deleteText` — ที่เรียกเข้า `NoteDoc` เก็บ op ที่ engine ส่งกลับมา แล้ว re-render UI จาก `title()` และ `text()`
+note store (`store.ts`) ที่เป็นเจ้าของ WASM CRDT สำหรับ note ที่เปิดอยู่ และเปิด edit method ให้สามตัว — `setTitle`, `insertText`, `deleteText` — ที่เรียกเข้า `NoteDoc` เก็บ op ที่ engine ส่งกลับมา แล้ว re-render UI จาก `title()` และ `text()`
 
-การกลับด้านที่เป็นหัวใจ: UI ไม่เคยแก้ string ตรง ๆ มันขอให้ CRDT apply edit และ CRDT คือผู้มีอำนาจตัดสินเพียงหนึ่งเดียวว่าตอนนี้ document พูดว่าอะไร op คือผลพลอยได้ที่เราจะ persist และ sync ในบทถัดไป ตรงนี้เราแค่ทำให้มันไหล
+การกลับด้านที่เป็นหัวใจ: UI ไม่เคยแก้ string ตรง ๆ แต่ขอให้ CRDT apply edit และ CRDT คือผู้มีอำนาจตัดสินเพียงหนึ่งเดียวว่าตอนนี้ document พูดว่าอะไร op คือผลพลอยได้ที่เราจะ persist และ sync ในบทถัดไป ตรงนี้เราแค่ทำให้ไหลได้ก่อน
 
 ```mermaid
 flowchart LR
@@ -21,13 +21,13 @@ flowchart LR
     Store -->|"text() / title()"| UI["re-render editor"]
 ```
 
-## Why
+## ทำไม
 
 CRDT engine คือแหล่งความถูกต้องเพียงหนึ่งเดียว ทุก device รัน Rust code *ตัวเดียวกัน* ที่ compile เป็น WASM ดังนั้น edit ที่ apply บน client หนึ่งจะผลิต op ที่มีความหมายเหมือนกันเป๊ะบนอีก client หนึ่ง ถ้า UI แก้ JavaScript string ธรรมดาแล้วค่อยส่งให้ CRDT *ทีหลัง* ทั้งสอง representation อาจ drift ออกจากกันได้ — และ drift นี่แหละคือสิ่งที่ CRDT ถูกสร้างมาเพื่อป้องกันโดยตรง
 
-การ apply edit ผ่าน `NoteDoc` ก่อนยังให้ op มาฟรี ๆ ด้วย `insert_text` ไม่ได้แค่แก้ document; มัน *return* op ที่อธิบายการแก้นั้น ค่าที่ return มานั้นคือ atom ที่เราเก็บลง outbox แล้ว push ไป server การผลิต state และผลิต sync record ในการเรียกครั้งเดียวหมายความว่าทั้งสองจะไม่มีวันขัดแย้งกันได้
+การ apply edit ผ่าน `NoteDoc` ก่อนยังให้ op มาฟรี ๆ ด้วย `insert_text` ไม่ได้แค่แก้ document; แต่ *return* op ที่อธิบายการแก้นั้นด้วย ค่าที่ return มานั้นคือ atom ที่เราเก็บลง outbox แล้ว push ไป server การผลิต state และผลิต sync record ในการเรียกครั้งเดียวหมายความว่าทั้งสองจะไม่มีวันขัดแย้งกันได้
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **op เป็นค่าที่ทุก edit return กลับมา เทียบกับ diff state ทีหลัง**
 
@@ -36,14 +36,14 @@ CRDT engine คือแหล่งความถูกต้องเพี�
 
 **boot WASM ครั้งเดียวแล้วถือ `NoteDoc` ที่มีชีวิต เทียบกับสร้างใหม่จาก snapshot ทุกครั้งที่ edit**
 
-- **Pros:** edit เป็นการเรียก method ใน memory ที่ราคาถูก; engine เก็บ index ภายในของมันไว้ให้พร้อมใช้เสมอ
-- **Cons:** document ที่มีชีวิตคือ mutable state ที่คุณต้องดูแลอย่างระวัง — หนึ่ง `NoteDoc` ต่อหนึ่ง note ที่เปิดอยู่ และคุณต้องไม่ทำมันหายโดยไม่ persist (บทถัดไปจะปิดช่องว่างนั้น)
+- **Pros:** edit เป็นการเรียก method ใน memory ที่ราคาถูก; engine เก็บ index ภายในไว้ให้พร้อมใช้เสมอ
+- **Cons:** document ที่มีชีวิตคือ mutable state ที่คุณต้องดูแลอย่างระวัง — หนึ่ง `NoteDoc` ต่อหนึ่ง note ที่เปิดอยู่ และคุณต้องไม่ทำหายโดยไม่ persist (บทถัดไปจะปิดช่องว่างนั้น)
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `apps/web/src/store.ts`
 
-boot WASM module แค่ครั้งเดียวเป๊ะ ๆ แล้วเก็บ `NoteDoc` ของ note ที่เปิดอยู่ไว้ใน memory ตัว `init` default export จะ load และ instantiate ไฟล์ `.wasm`; คุณต้อง `await` มันก่อนสร้าง exported type ใด ๆ
+boot WASM module แค่ครั้งเดียวเป๊ะ ๆ แล้วเก็บ `NoteDoc` ของ note ที่เปิดอยู่ไว้ใน memory ตัว `init` default export จะ load และ instantiate ไฟล์ `.wasm`; คุณต้อง `await` ก่อนสร้าง exported type ใด ๆ
 
 ```ts
 import init, { NoteDoc } from '../../../crates/crdt/pkg/crdt.js';
@@ -128,7 +128,7 @@ export async function openBlankNote(
 
 ### 3. `apps/web/src/components/note-editor.ts`
 
-editor ไม่เคยแก้ string ของตัวเอง มันคำนวณช่วงที่เปลี่ยน เรียก store แล้ววาดกลับสิ่งที่ CRDT รายงานมา snippet นี้แสดง title และการแทนที่ทั้งค่าสำหรับ body — การลดการแทนที่ทั้งก้อนให้เป็น insert/delete ช่วยให้การต่อสายซื่อตรงระหว่างที่เรากำลังเรียนรู้
+editor ไม่เคยแก้ string ของตัวเอง แต่คำนวณช่วงที่เปลี่ยน เรียก store แล้ววาดกลับสิ่งที่ CRDT รายงานมา snippet นี้แสดง title และการแทนที่ทั้งค่าสำหรับ body — การลดการแทนที่ทั้งก้อนให้เป็น insert/delete ช่วยให้การต่อสายซื่อตรงระหว่างที่เรากำลังเรียนรู้
 
 ```ts
 import type { OpenNote } from '../store';
@@ -165,9 +165,9 @@ export class NoteEditor extends HTMLElement {
 customElements.define('note-editor', NoteEditor);
 ```
 
-## Verify
+## ตรวจสอบผล
 
-ต่อสาย store เข้ากับ page แล้วขับมันจาก browser console ก่อนอื่นยืนยันว่า WASM package ถูก build แล้ว:
+ต่อสาย store เข้ากับ page แล้วขับจาก browser console ก่อนอื่นยืนยันว่า WASM package ถูก build แล้ว:
 
 ```bash
 pnpm --filter web build:wasm   # runs: wasm-pack build --target web (crates/crdt → pkg)
@@ -201,6 +201,6 @@ pnpm --filter web build
 3. ทำไม `await init()` ต้องเสร็จก่อน `new NoteDoc(actorId)` — ถ้าไม่ทำจะเกิดอะไรขึ้น?
 4. ทำไมถึงเก็บ `NoteDoc` ที่มีชีวิตไว้หนึ่งตัวใน memory แทนที่จะสร้างใหม่จาก state ที่เก็บไว้ทุกครั้งที่กดคีย์?
 
-## Recap
+## สรุป
 
 ตอนนี้ note store boot WASM CRDT ถือ `NoteDoc` ที่มีชีวิตหนึ่งตัวต่อ note ที่เปิดอยู่ และแปลงทุก edit ให้เป็น op ขณะที่ UI render จาก `title()` และ `text()` op ไหลอยู่แต่ระเหยหายไป — ยังไม่มีอะไรถูก save เลย ต่อไป [Persisting ops →](/offlinenotes/th/wiring-wasm/persisting-ops/) จะเขียน snapshot ลง IndexedDB และ queue แต่ละ op ไว้ใน outbox เพื่อให้การ reload กู้ document กลับมาได้เป๊ะ ๆ

@@ -5,29 +5,29 @@ sidebar:
   order: 1
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
-note มีสองส่วนที่ merge ต่างกัน **body** เป็น sequence ของตัวอักษรที่ insert พร้อมกันต้องรอด *ทั้งคู่* — นั่นคือบทถัดไป **title** ง่ายกว่า: มันเป็นค่าเดียว และเมื่อสองเครื่องตั้งมันตอน offline เราต้องเก็บไว้แค่ *อันเดียว* แบบ deterministic เป็นตัวเลือกเดียวกันบนทุกเครื่อง นั่นคือ **last-writer-wins (LWW) register** และเป็น CRDT ที่นุ่มนวลที่สุดสำหรับเริ่มต้น
+note มีสองส่วนที่ merge ต่างกัน **body** เป็น sequence ของตัวอักษรที่ insert พร้อมกันต้องรอด *ทั้งคู่* — นั่นคือบทถัดไป **title** ง่ายกว่า: title เป็นค่าเดียว และเมื่อสองเครื่องตั้งค่าตอน offline เราต้องเก็บไว้แค่ *อันเดียว* แบบ deterministic เป็นตัวเลือกเดียวกันบนทุกเครื่อง นั่นคือ **last-writer-wins (LWW) register** และเป็น CRDT ที่นุ่มนวลที่สุดสำหรับเริ่มต้น
 
 บทนี้สร้าง `Lww<T>` แบบ generic — ค่าที่จับคู่กับ Lamport timestamp — พร้อม `merge` ที่เก็บ write ที่ใหม่กว่า แล้วต่อสายเข้า `NoteDoc` เป็น field `title` เราจะ implement `set_title`, `title` และ branch `SetTitle` ของ `merge` ตามสัญญาเป๊ะ พอจบ `NoteDoc` สองตัวที่ตั้ง title พร้อมกันจะ converge เป็น string เดียวกัน
 
-## Why
+## ทำไม
 
 "last write wins" ฟังดูง่ายจนกว่าคุณจะถามว่า *last by whose clock?* เวลา wall-clock เป็นกับดัก: clock ของเครื่อง drift ดังนั้น note ที่แก้ตอน 10:00 บนโทรศัพท์ที่ clock ช้าอาจดู "ใหม่กว่า" อันที่แก้ตอน 10:05 บน laptop แล้ว edit ที่ผิดชนะ แย่กว่านั้น การเสมอกันแบบ wall-clock เป็นไปได้และแก้ต่างกันบนเครื่องต่างกัน — replica จึง *diverge*
 
-**Lamport timestamp** แก้ทั้งสองอย่าง มันเป็น pair `(counter, actor)` counter เป็น logical clock ที่นับแค่ event ไม่เคยนับวินาที; ทุก edit ในเครื่องเราเพิ่มมัน และทุก merge เรา bump มันข้ามอะไรก็ตามที่เราเคยเห็น (`self.counter = max(self.counter, incoming)`) การเทียบ timestamp สองตัวคือ tuple compare: counter สูงกว่าชนะ และเมื่อ counter *เสมอ* actor id สูงกว่าชนะ actor tie-break นั้นคือส่วนสำคัญ — มันทำให้ ordering เป็น **total order** ดังนั้น "ใหม่กว่า" เป็นการตัดสินใจที่ทุก replica ไปถึงเหมือนกันเป๊ะ ไม่มีการประสานงาน ไม่มี central clock และ merge ไม่ขึ้นกับลำดับ
+**Lamport timestamp** แก้ทั้งสองอย่าง เป็น pair `(counter, actor)` counter เป็น logical clock ที่นับแค่ event ไม่เคยนับวินาที; ทุก edit ในเครื่องเราเพิ่มค่านี้ และทุก merge เรา bump ข้ามอะไรก็ตามที่เราเคยเห็น (`self.counter = max(self.counter, incoming)`) การเทียบ timestamp สองตัวคือ tuple compare: counter สูงกว่าชนะ และเมื่อ counter *เสมอ* actor id สูงกว่าชนะ actor tie-break นั้นคือส่วนสำคัญ — เพราะทำให้ ordering เป็น **total order** ดังนั้น "ใหม่กว่า" เป็นการตัดสินใจที่ทุก replica ไปถึงเหมือนกันเป๊ะ ไม่มีการประสานงาน ไม่มี central clock และ merge ไม่ขึ้นกับลำดับ
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **LWW register vs a sequence CRDT for the title**
 - **Pros:** เล็กจิ๋ว — ค่าเดียว, timestamp เดียว, merge สามบรรทัด สำหรับ field ที่คุณต้องการผู้ชนะเดียวจริง ๆ (title, สี, boolean flag) นั่นถูกต้องพอดีและถูก
-- **Cons:** มัน *ทิ้ง* write ที่แพ้ไปเงียบ ๆ ซึ่งยอมรับไม่ได้สำหรับ body text (คุณจะเสียครึ่งย่อหน้า) นั่นคือเหตุผลที่ body ต้องการ sequence CRDT ที่หนักกว่า จับคู่ CRDT ให้ตรงกับความหมายของ field
+- **Cons:** *ทิ้ง* write ที่แพ้ไปเงียบ ๆ ซึ่งยอมรับไม่ได้สำหรับ body text (คุณจะเสียครึ่งย่อหน้า) นั่นคือเหตุผลที่ body ต้องการ sequence CRDT ที่หนักกว่า จับคู่ CRDT ให้ตรงกับความหมายของ field
 
 **Lamport timestamp vs wall-clock time for LWW**
 - **Pros:** ไม่ขึ้นกับ clock ที่ sync กัน; total order ผ่าน actor tie-break ดังนั้นทุก replica เห็นด้วยเรื่องผู้ชนะ; ทนต่อ clock skew และ drift
 - **Cons:** counter บอกแค่ลำดับ *causal* ไม่ใช่เวลาจริงที่ผ่านไป — คุณถามไม่ได้ว่า "อันไหนแก้ก่อนเป็นวินาที" สำหรับ merge นั่นไม่เกี่ยว; สำหรับ label "last edited" ที่คนเห็น คุณจะเก็บ wall-clock stamp แยกไว้ show อย่างเดียว
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `crates/crdt/src/lib.rs` — the `Lww<T>` register
 
@@ -64,7 +64,7 @@ impl<T: Clone> Lww<T> {
 
 ### 2. The `NoteDoc` skeleton and its Lamport clock
 
-`NoteDoc` คือ struct ที่ wasm-bindgen export มันเป็นเจ้าของ actor id, Lamport `counter`, register `title` และ (บทถัดไป) body ทุก edit ในเครื่องเรียก `tick()` เพื่อสร้าง timestamp ใหม่ที่เพิ่มขึ้นเข้มงวด
+`NoteDoc` คือ struct ที่ wasm-bindgen export ออกไป เป็นเจ้าของ actor id, Lamport `counter`, register `title` และ (บทถัดไป) body ทุก edit ในเครื่องเรียก `tick()` เพื่อสร้าง timestamp ใหม่ที่เพิ่มขึ้นเข้มงวด
 
 ```rust
 use wasm_bindgen::prelude::*;
@@ -99,7 +99,7 @@ impl NoteDoc {
 
 ### 3. `set_title`, `title`, and the `SetTitle` merge branch
 
-`set_title` ตรงกับสัญญาเป๊ะ: มัน stamp timestamp ใหม่, update register ในเครื่อง และคืน op ที่มันผลิตเป็น JS value — **array หนึ่งสมาชิก** เพราะแอปที่เหลือจัดการ op เป็น batch เสมอ `merge` รับ JS array ของ op, deserialize มัน แล้วพับแต่ละตัวเข้ามา สำคัญคือ การ merge remote op **เลื่อน clock ของเรา** ข้าม counter ของมัน ดังนั้น local edit ครั้งถัดไปของเราจะรับประกันว่า outrank มัน
+`set_title` ตรงกับสัญญาเป๊ะ: stamp timestamp ใหม่, update register ในเครื่อง แล้วคืน op ที่ผลิตออกมาเป็น JS value — **array หนึ่งสมาชิก** เพราะแอปที่เหลือจัดการ op เป็น batch เสมอ `merge` รับ JS array ของ op, deserialize แล้วพับแต่ละตัวเข้ามา สำคัญคือ การ merge remote op **เลื่อน clock ของเรา** ข้าม counter ที่เข้ามา ดังนั้น local edit ครั้งถัดไปของเราจะ outrank แน่นอน
 
 ```rust
 use super::Op; // the enum from the boundary lesson
@@ -137,7 +137,7 @@ impl NoteDoc {
 }
 ```
 
-## Verify
+## ตรวจสอบผล
 
 Build crate:
 
@@ -206,10 +206,10 @@ test result: ok. 1 passed; 0 failed
 1. สองเครื่องตั้ง title ตอน offline แต่ละเครื่องที่ counter 1 อันไหนชนะ และอะไรรับประกันว่าทั้งสองเครื่องเลือกผู้ชนะ *คนเดียวกัน*?
 2. ทำไม `merge` ทำ `self.counter = self.counter.max(ts.0)` แทนที่จะปล่อย counter ไว้เฉย ๆ?
 3. ทำไมเวลา wall-clock เป็น timestamp ที่แย่สำหรับ LWW register ในแอปแบบ offline-first?
-4. ทำไม LWW register จึงเป็น CRDT ที่ผิดสำหรับ *body* ของ note แม้ว่ามันจะโอเคสำหรับ title?
+4. ทำไม LWW register จึงเป็น CRDT ที่ผิดสำหรับ *body* ของ note แม้จะโอเคสำหรับ title?
 
-## Recap
+## สรุป
 
-เราสร้าง `Lww<T>` — ค่าบวก Lamport `(counter, actor)` timestamp — แล้ว merge มันด้วยการเก็บ timestamp ที่มากกว่า โดย actor id ตัดการเสมอให้เป็น total order ต่อสายเข้า `NoteDoc` นั่นคือ `set_title`, `title` และ branch `SetTitle` ของ `merge` แต่ละตัวคืนหรือ consume รูปแบบ `Op` แบบ batch ที่แอปทั้งหมดแชร์ ตอนนี้การแก้ title พร้อมกัน converge ได้ แบบ deterministic โดยไม่มี clock และไม่มี coordinator
+เราสร้าง `Lww<T>` — ค่าบวก Lamport `(counter, actor)` timestamp — แล้ว merge ด้วยการเก็บ timestamp ที่มากกว่า โดย actor id ตัดการเสมอให้เป็น total order ต่อสายเข้า `NoteDoc` นั่นคือ `set_title`, `title` และ branch `SetTitle` ของ `merge` แต่ละตัวคืนหรือ consume รูปแบบ `Op` แบบ batch ที่แอปทั้งหมดแชร์ ตอนนี้การแก้ title พร้อมกัน converge ได้ แบบ deterministic โดยไม่มี clock และไม่มี coordinator
 
 title เป็นค่าเดียว body เป็น *sequence* ที่ insert พร้อมกันต้องรอดทั้งหมด — ปัญหาที่ยากกว่า และเป็นหัวใจของ CRDT: [A sequence CRDT →](/offlinenotes/th/crdt-rust/a-sequence-crdt/)

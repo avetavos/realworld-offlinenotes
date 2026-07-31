@@ -1,13 +1,13 @@
 ---
 title: Precaching the shell
-description: "เขียน Service Worker เองที่ precache app shell ตอน install, เคลียร์ cache เก่าตอน activate, และเสิร์ฟ shell กับ asset แบบ cache-first ในขณะที่ปล่อยให้ sync API วิ่งไป network"
+description: "เขียน Service Worker เองที่ precache app shell ตอน install, เคลียร์ cache เก่าตอน activate, และเสิร์ฟ shell กับ asset แบบ cache-first ส่วน sync API ปล่อยให้วิ่งไป network"
 sidebar:
   order: 1
 ---
 
-data อยู่ใน IndexedDB แล้ว ดังนั้น note รอด offline ได้ — แต่ลอง reload page ตอนไม่มี network ดูสิ คุณจะเจอไดโนเสาร์ของ browser เพราะ HTML, JS, และ WASM มาจาก server **Service Worker** แก้เรื่องนี้ด้วยการ cache app shell เอาไว้เอง เราเขียนมันเอง (ไม่ใช้ Workbox) เพื่อให้เห็นทุกบรรทัด
+data อยู่ใน IndexedDB แล้ว ดังนั้น note รอด offline ได้ — แต่ลอง reload page ตอนไม่มี network ดูสิ คุณจะเจอไดโนเสาร์ของ browser เพราะ HTML, JS, และ WASM มาจาก server **Service Worker** แก้เรื่องนี้ด้วยการ cache app shell เอาไว้เอง เราเขียนเอง (ไม่ใช้ Workbox) เพื่อให้เห็นทุกบรรทัด
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 `apps/web/public/sw.js`, Service Worker ที่มี lifecycle handler สามตัว:
 
@@ -15,7 +15,7 @@ data อยู่ใน IndexedDB แล้ว ดังนั้น note รอ
 - **`activate`** — ลบ cache จาก version ก่อนหน้าเพื่อไม่ให้ asset เก่าค้างอยู่ตลอดกาล
 - **`fetch`** — เสิร์ฟ shell และ static asset แบบ **cache-first**; ปล่อยให้ sync API วิ่งไป **network** เสมอ
 
-บวกกับการ register หนึ่งบรรทัดจาก app entry เพื่อให้ browser install มัน
+บวกกับการ register หนึ่งบรรทัดจาก app entry เพื่อให้ browser install ให้
 
 ```mermaid
 flowchart TD
@@ -26,31 +26,31 @@ flowchart TD
     Fetch -->|"sync API"| Net["network"]
 ```
 
-## Why
+## ทำไม
 
-Service Worker คือ **network proxy ที่คงอยู่ข้าม page load** เมื่อ install แล้ว มันนั่งอยู่ระหว่าง app กับ network และตอบ `fetch` event แม้ในตอนที่เพิ่งเปิด tab ขึ้นมาเย็น ๆ โดยปิดสัญญาณ นั่นคือครึ่งที่ขาดหายไปของ offline-first: IndexedDB ทำให้ *data* เป็น local; Service Worker ทำให้ *code ที่ render มัน* เป็น local ด้วย ถ้าไม่มีทั้งสอง "offline" จะใช้ได้ก็ต่อเมื่อ user ไม่เคยปิด tab เลย
+Service Worker คือ **network proxy ที่คงอยู่ข้าม page load** เมื่อ install แล้ว จะนั่งอยู่ระหว่าง app กับ network และตอบ `fetch` event แม้ในตอนที่เพิ่งเปิด tab ขึ้นมาเย็น ๆ โดยปิดสัญญาณ นั่นคือครึ่งที่ขาดหายไปของ offline-first: IndexedDB ทำให้ *data* เป็น local; Service Worker ทำให้ *code ที่ render data นั้น* เป็น local ด้วย ถ้าไม่มีทั้งสอง "offline" จะใช้ได้ก็ต่อเมื่อ user ไม่เคยปิด tab เลย
 
-cache-first คือ default ที่ถูกต้อง *สำหรับ shell* พอดี เพราะ shell คือ build ที่เราคุม version เอง — hashed asset ไม่เคยเปลี่ยนภายใต้ URL หนึ่ง ๆ ดังนั้นการ return copy จาก cache ไม่ใช่แค่เร็วกว่า แต่ถูกต้องด้วย ส่วน sync API ตรงข้ามกัน: คุณค่าทั้งหมดของมันคือ op สด ๆ จาก device อื่น มันจึงต้องไปถึง network และไม่ควรถูกตอบจาก cache ที่ค้างเก่า การแยกสองอย่างนี้ตาม request kind แทนที่จะ cache ทุกอย่าง คือสิ่งที่ทำให้ app ทั้งทันทีและถูกต้อง
+cache-first คือ default ที่ถูกต้อง *สำหรับ shell* พอดี เพราะ shell คือ build ที่เราคุม version เอง — hashed asset ไม่เคยเปลี่ยนภายใต้ URL หนึ่ง ๆ ดังนั้นการ return copy จาก cache ไม่ใช่แค่เร็วกว่า แต่ถูกต้องด้วย ส่วน sync API ตรงข้ามกัน: คุณค่าทั้งหมดอยู่ที่ op สด ๆ จาก device อื่น จึงต้องไปถึง network และไม่ควรตอบจาก cache ที่ค้างเก่า การแยกสองอย่างนี้ตาม request kind แทนที่จะ cache ทุกอย่าง คือสิ่งที่ทำให้ app ทั้งทันทีและถูกต้อง
 
-เราข้าม Workbox อย่างตั้งใจ ใน production คุณคงจะใช้มัน และ Astro สร้าง precache manifest ของ hashed file ตอน build ได้ ที่นี่เป้าหมายคือการ *เข้าใจ* lifecycle — install, activate, fetch, และ cache versioning — ไม่ใช่การ abstract มันออกไป
+เราข้าม Workbox อย่างตั้งใจ ใน production คุณคงใช้ และ Astro สร้าง precache manifest ของ hashed file ตอน build ได้ ที่นี่เป้าหมายคือการ *เข้าใจ* lifecycle — install, activate, fetch, และ cache versioning — ไม่ใช่การ abstract ออกไป
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **cache-first สำหรับ shell เทียบกับ network-first ที่มี cache fallback**
 
 - **Pros:** โหลดทันทีและ offline ได้จริง — cached shell render ก่อนที่จะปรึกษา network ด้วยซ้ำ; connection ที่กระท่อนกระแท่นไม่เคยหน่วง startup
-- **Cons:** shell ที่เพิ่ง deploy ใหม่จะยังไม่ถูกเห็นจนกว่า SW จะ update และ cache version ของมันเลื่อนขึ้น; คุณต้องจัดการ versioning อย่างตั้งใจ ไม่งั้น user รัน code เก่า
+- **Cons:** shell ที่เพิ่ง deploy ใหม่จะยังไม่ถูกเห็นจนกว่า SW จะ update และ cache version เลื่อนขึ้น; คุณต้องจัดการ versioning อย่างตั้งใจ ไม่งั้น user รัน code เก่า
 
 **เขียน SW เอง เทียบกับ Workbox / precache manifest ที่ generate มา**
 
 - **Pros:** ทุกพฤติกรรม explicit และ debug ได้; ไม่มีอะไรซ่อน เหมาะสำหรับการเรียนรู้ platform primitive
 - **Cons:** คุณดูแล shell list และ cache-busting เอง; hashed asset filename เปลี่ยนทุก build ดังนั้น static list ต้องพึ่ง runtime caching (ด้านล่าง) เพื่อให้ครบถ้วน
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `apps/web/public/sw.js`
 
-ไฟล์ใน `public/` ถูกเสิร์ฟที่ site root ดังนั้นเมื่อมี `base: '/offlinenotes'` มันจะไปตกที่ `/offlinenotes/sw.js` เลื่อน `CACHE` ขึ้นทุกครั้งที่ shell เปลี่ยน — `install` ของ version ใหม่จะ recache และ `activate` จะ evict ตัวเก่าออก
+ไฟล์ใน `public/` ถูกเสิร์ฟที่ site root ดังนั้นเมื่อมี `base: '/offlinenotes'` ไฟล์จะไปตกที่ `/offlinenotes/sw.js` เลื่อน `CACHE` ขึ้นทุกครั้งที่ shell เปลี่ยน — `install` ของ version ใหม่จะ recache และ `activate` จะ evict ตัวเก่าออก
 
 ```js
 // apps/web/public/sw.js
@@ -132,7 +132,7 @@ export function registerServiceWorker() {
 
 ### 3. `apps/web/src/main.ts`
 
-เรียกมันหนึ่งครั้งจาก entry ที่ boot app
+เรียกหนึ่งครั้งจาก entry ที่ boot app
 
 ```ts
 import { registerServiceWorker } from './register-sw';
@@ -140,9 +140,9 @@ import { registerServiceWorker } from './register-sw';
 registerServiceWorker();
 ```
 
-## Verify
+## ตรวจสอบผล
 
-Service Worker ควบคุมเฉพาะ page ที่เสิร์ฟผ่าน `https` หรือ `localhost` และ caching ของมันดูง่ายที่สุดเมื่อทดสอบกับ build จริง build แล้ว preview:
+Service Worker ควบคุมเฉพาะ page ที่เสิร์ฟผ่าน `https` หรือ `localhost` และดู caching ได้ง่ายที่สุดเมื่อทดสอบกับ build จริง build แล้ว preview:
 
 ```bash
 pnpm --filter web build
@@ -170,6 +170,6 @@ Reload → the app still renders (served from Cache Storage)
 3. ทำไม cache-first ถึงถูกต้องสำหรับ hashed build asset แต่ผิดสำหรับ sync API?
 4. อะไรจะพังถ้าคุณไม่เคยเลื่อน `CACHE` และ `activate` handler ทำอะไรกับ version เก่า?
 
-## Recap
+## สรุป
 
-ตอนนี้ Service Worker ที่เราเขียนเอง precache shell ตอน `install`, evict cache ที่ค้างเก่าตอน `activate`, และเสิร์ฟ app แบบ cache-first ในขณะที่ sync API ยังไปถึง network ได้ — ดังนั้น OfflineNotes โหลดได้โดยปิด network เต็มที่ มันรันได้ แต่ browser ยังไม่เสนอให้ *install* มันลง home screen ต่อไป [Installable PWA →](/offlinenotes/th/service-worker/installable-pwa/) เพิ่ม manifest และ install prompt แล้วยืนยันการใช้ offline เต็มรูปแบบใน DevTools
+ตอนนี้ Service Worker ที่เราเขียนเอง precache shell ตอน `install`, evict cache ที่ค้างเก่าตอน `activate`, และเสิร์ฟ app แบบ cache-first ส่วน sync API ยังไปถึง network ได้ — ดังนั้น OfflineNotes โหลดได้โดยปิด network เต็มที่ แอปรันได้ แต่ browser ยังไม่เสนอให้ *install* ลง home screen ต่อไป [Installable PWA →](/offlinenotes/th/service-worker/installable-pwa/) เพิ่ม manifest และ install prompt แล้วยืนยันการใช้ offline เต็มรูปแบบใน DevTools

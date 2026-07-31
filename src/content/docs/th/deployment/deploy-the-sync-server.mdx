@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 sync server จาก Module 9 เก็บ op log ของทุก note ไว้ใน `Map<noteId, {seq, op}[]>` ใน memory ซึ่งเยี่ยมสำหรับ `localhost` แต่ถึงตายใน production: Worker เป็น stateless ระหว่าง request และถูก tear down อยู่ตลอด ดังนั้น `Map` — และ ops ของทุกคนที่ยังไม่ถูก pull — จึงหายไปตอน cold start ครั้งถัดไป
 
@@ -17,25 +17,25 @@ sync server จาก Module 9 เก็บ op log ของทุก note ไ�
 
 protocol ไม่เปลี่ยน — ยังคงเป็น `POST /docs/:id/ops` และ `GET /docs/:id/ops?since=` เปลี่ยนแค่ *ที่อยู่* ของ op log เท่านั้น
 
-## Why
+## ทำไม
 
-server เป็น **thin relay**: มันไม่เคย merge และไม่เคยเป็นเจ้าของความจริง (CRDT และ client ทำสิ่งนั้น) แต่มันเป็นเจ้าของสิ่งหนึ่งที่ต้องรอดจากการ restart — **op log แบบ append-only ต่อ note** พร้อม **server sequence number ที่ monotonic** เพื่อให้ `?since=` ส่ง ops ที่อุปกรณ์ยังไม่เห็นให้ได้ตรงเป๊ะ `Map` ให้ seq นั้นมาฟรีใน process เดียว แต่บน edge ไม่มี process เดี่ยว เราจึงต้องการ storage ที่ทั้ง **durable** และ **ถูกต้องภายใต้การ push พร้อมกัน**
+server เป็น **thin relay**: ไม่เคย merge และไม่เคยเป็นเจ้าของความจริง (CRDT และ client ทำสิ่งนั้น) แต่เป็นเจ้าของสิ่งหนึ่งที่ต้องรอดจากการ restart — **op log แบบ append-only ต่อ note** พร้อม **server sequence number ที่ monotonic** เพื่อให้ `?since=` ส่ง ops ที่อุปกรณ์ยังไม่เห็นให้ได้ตรงเป๊ะ `Map` ให้ seq นั้นมาฟรีใน process เดียว แต่บน edge ไม่มี process เดี่ยว เราจึงต้องการ storage ที่ทั้ง **durable** และ **ถูกต้องภายใต้การ push พร้อมกัน**
 
 ข้อกำหนดที่สองนั่นแหละคือเหตุผลทั้งหมดที่ต้องคิดก่อนจะคว้า key-value store ตัวที่ใกล้ที่สุด seq คือ counter ที่อุปกรณ์สองเครื่องอาจพยายามเพิ่มค่าในเสี้ยววินาทีเดียวกัน ทำพลาดตรงนั้นแล้วสอง ops จะใช้ seq ร่วมกัน หรือตัวหนึ่งเขียนทับอีกตัว — และอุปกรณ์หนึ่งจะไม่มีวัน pull การแก้ไขนั้นแบบเงียบ ๆ ดังนั้นการเลือก backing store จริง ๆ แล้วคือการเลือกว่า *ใครรับประกันว่า counter นั้น monotonic*
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **Durable Object vs Workers KV for the op log**
 
-- **Durable Object — Pros:** DO คือ actor แบบ single-threaded ตัวเดียวที่ addressable ได้ `idFromName(noteId)` ให้ object หนึ่งตัวต่อ note พอดี และ input gate ของมัน serialize request ดังนั้นการเพิ่ม seq และ append op จึง **atomic โดยไม่ต้องเขียน lock เอง** storage ของมัน strongly consistent นี่คือตัวที่เข้ากับ append log ต่อ key แบบในตำรา **Cons:** มีอีกหนึ่ง concept (class + migration) และ note ที่เป็น global hotspot จะ route ผ่าน object ตัวเดียว
+- **Durable Object — Pros:** DO คือ actor แบบ single-threaded ตัวเดียวที่ addressable ได้ `idFromName(noteId)` ให้ object หนึ่งตัวต่อ note พอดี และ input gate serialize request ดังนั้นการเพิ่ม seq และ append op จึง **atomic โดยไม่ต้องเขียน lock เอง** storage ของ DO strongly consistent นี่คือตัวที่เข้ากับ append log ต่อ key แบบในตำรา **Cons:** มีอีกหนึ่ง concept (class + migration) และ note ที่เป็น global hotspot จะ route ผ่าน object ตัวเดียว
 - **Workers KV — Pros:** ง่ายสุด ๆ — global key-value store, หนึ่ง binding, `get`/`put`/`list` เยี่ยมสำหรับข้อมูลที่ read หนักและ conflict น้อย **Cons:** KV เป็น **eventually consistent** และ **ไม่มี atomic increment** ดังนั้นการ push พร้อมกันสองครั้งไปที่ note เดียวกันจึง race seq counter กันแล้วชนกันได้ โอเคสำหรับ demo แบบ single-writer; ผิดสำหรับการแก้ไขออฟไลน์พร้อมกันที่คอร์สนี้ทั้งคอร์สพูดถึง เราจะ build DO แล้วโชว์ KV เป็นทางเลือกที่ง่ายกว่าแต่มีข้อแม้
 
 **Sync as its own Worker vs folding it into the Pages app**
 
 - **Pros of a separate Worker:** relay ยังเป็นอิสระจาก client — คนละ origin, คนละ lifecycle, deploy ตัวใดตัวหนึ่งได้โดยไม่แตะอีกตัว และขอบเขต "thin server" ยังซื่อตรง **Pros of folding it in** (Pages Functions): deploy เดียว, domain เดียว, ไม่มี CORS
-- **Cons:** สอง deploy และ CORS config ที่ต้องดูแล เราแยกมันไว้เพราะ architecture มอง server เป็น transport ที่สลับได้ — มันอาจกลายเป็น peer-to-peer ทีหลัง และ client ไม่ควรต้องแคร์
+- **Cons:** สอง deploy และ CORS config ที่ต้องดูแล เราแยกไว้เพราะ architecture มอง server เป็น transport ที่สลับได้ — อาจกลายเป็น peer-to-peer ทีหลัง และ client ไม่ควรต้องแคร์
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `apps/sync/src/index.ts` — the Hono app, routing to a Durable Object
 
@@ -83,7 +83,7 @@ export default app;
 
 ### 2. `apps/sync/src/op-log.ts` — the `OpLog` Durable Object
 
-หนึ่ง object ต่อ note มันถือ counter `head` และทุก op โดย key ด้วย seq ที่ zero-pad ไว้ เพื่อให้ลำดับ lexical เท่ากับลำดับ numeric — ซึ่งทำให้ "ops ตั้งแต่ N" เป็น prefix range read ครั้งเดียว ทั้งสอง method รันภายใน input gate ของ DO ดังนั้น seq จึง race ไม่ได้
+หนึ่ง object ต่อ note ถือ counter `head` และทุก op โดย key ด้วย seq ที่ zero-pad ไว้ เพื่อให้ลำดับ lexical เท่ากับลำดับ numeric — ทำให้ "ops ตั้งแต่ N" เป็น prefix range read ครั้งเดียว ทั้งสอง method รันภายใน input gate ของ DO ดังนั้น seq จึง race ไม่ได้
 
 ```ts
 import { DurableObject } from 'cloudflare:workers';
@@ -123,7 +123,7 @@ export class OpLog extends DurableObject {
 
 ### 3. `apps/sync/wrangler.jsonc` — bind the object and migrate
 
-DO ต้องการทั้ง binding *และ* migration ที่ register class นั้น `new_sqlite_classes` ใช้ storage แบบ SQLite ปัจจุบัน ซึ่งเป็นตัวที่ `this.ctx.storage` read และ write
+DO ต้องการทั้ง binding *และ* migration ที่ register class นั้น `new_sqlite_classes` ใช้ storage แบบ SQLite ปัจจุบัน อันเดียวกับที่ `this.ctx.storage` read และ write
 
 ```jsonc
 {
@@ -144,7 +144,7 @@ DO ต้องการทั้ง binding *และ* migration ที่ reg
 
 ### 4. The KV alternative (simpler, with the caveat)
 
-ถ้าคุณอยากส่ง KV มากกว่า ให้สร้าง namespace แล้ว bind มัน — แต่อ่านข้อแม้ก่อน
+ถ้าคุณอยากส่ง KV มากกว่า ให้สร้าง namespace แล้ว bind เข้าไป — แต่อ่านข้อแม้ก่อน
 
 ```sh
 npx wrangler kv namespace create OPS
@@ -176,7 +176,7 @@ app.post('/docs/:id/ops', async (c) => {
 });
 ```
 
-ฝั่ง read จะ list key ใต้ prefix `op:` ของ note นั้นแล้ว filter ด้วย seq มันทำงานได้ — แต่อุปกรณ์สองเครื่องที่ push พร้อมกันอาจ read `head` ตัวเดียวกันทั้งคู่ แล้วตัวหนึ่งทับ seq ของอีกตัว นั่นคือต้นทุนของ eventual-consistency แบบไม่มี atomic increment Durable Object มีอยู่เพื่อปิดช่องนั้นพอดี
+ฝั่ง read จะ list key ใต้ prefix `op:` ของ note นั้นแล้ว filter ด้วย seq วิธีนี้ทำงานได้ — แต่อุปกรณ์สองเครื่องที่ push พร้อมกันอาจ read `head` ตัวเดียวกันทั้งคู่ แล้วตัวหนึ่งทับ seq ของอีกตัว นั่นคือต้นทุนของ eventual-consistency แบบไม่มี atomic increment Durable Object มีอยู่เพื่อปิดช่องนั้นพอดี
 
 ### 5. Deploy, then point the client at it
 
@@ -187,14 +187,14 @@ npx wrangler deploy
 # → https://offlinenotes-sync.<your-subdomain>.workers.dev
 ```
 
-`PUBLIC_SYNC_URL` เป็น public env var แบบ build-time ที่ client อ่าน (ค่าเริ่มต้น `http://localhost:8787`) rebuild แล้ว redeploy PWA โดยตั้งค่ามันเป็น URL ของ Worker:
+`PUBLIC_SYNC_URL` เป็น public env var แบบ build-time ที่ client อ่าน (ค่าเริ่มต้น `http://localhost:8787`) rebuild แล้ว redeploy PWA โดยตั้งค่าเป็น URL ของ Worker:
 
 ```sh
 PUBLIC_SYNC_URL=https://offlinenotes-sync.<your-subdomain>.workers.dev \
   pnpm run deploy:web
 ```
 
-## Verify
+## ตรวจสอบผล
 
 ยิงตรงไปที่ Worker ที่ deploy แล้วก่อน:
 
@@ -213,20 +213,20 @@ curl "$BASE/docs/demo/ops?since=0"
 
 1. **Persistence:** รัน `npx wrangler deploy` อีกครั้ง แล้วรัน `GET` ซ้ำ op **ยังอยู่** — storage ของ Durable Object รอดจาก redeploy และ cold start ต่างจาก `Map` ใน memory
 2. **CORS:** ยืนยันว่า response ต่อ request จาก Pages origin มี `Access-Control-Allow-Origin: https://offlinenotes.pages.dev` header ที่ผิดหรือหายไปคือบั๊ก "ใช้ได้ใน curl แต่พังในแอป" แบบคลาสสิก
-3. **End to end:** เปิด PWA ที่ deploy แล้วในเบราว์เซอร์สองตัว (หรือสองอุปกรณ์) แก้ไข note แบบออฟไลน์ในแต่ละตัว เอาทั้งคู่ออนไลน์ แล้วยืนยันว่าแต่ละอุปกรณ์ pull ops ของอีกฝั่งมา และ text ลู่เข้าหากัน — ผลตอบแทนจาก Module 12 คราวนี้บน network จริง
+3. **End to end:** เปิด PWA ที่ deploy แล้วใน browser สองตัว (หรือสองอุปกรณ์) แก้ไข note แบบออฟไลน์ในแต่ละตัว เอาทั้งคู่ออนไลน์ แล้วยืนยันว่าแต่ละอุปกรณ์ pull ops ของอีกฝั่งมา และ text ลู่เข้าหากัน — ผลตอบแทนจาก Module 12 คราวนี้บน network จริง
 4. `npx wrangler tail` stream log สด; ดู hit ของ `POST`/`GET` ตอน client สองตัว sync กัน
 
 คุณเสร็จเมื่อ note ที่แก้ไขบนอุปกรณ์หนึ่งโผล่บนอีกอุปกรณ์ และ op log รอดจาก redeploy
 
 **ตรวจสอบความเข้าใจ:**
 
-1. ทำไม op log แบบ `Map` ใน memory จึงทำงานบน `localhost` แต่พังทันทีที่มันเป็น Worker?
-2. server ไม่เคย merge ops — แล้วความถูกต้องชิ้นเดียวที่มันต้องรับประกันคืออะไร และ store ตัวไหนรับประกันมันให้ฟรี?
+1. ทำไม op log แบบ `Map` ใน memory จึงทำงานบน `localhost` แต่พังทันทีที่ย้ายไปเป็น Worker?
+2. server ไม่เคย merge ops — แล้วความถูกต้องชิ้นเดียวที่ต้องรับประกันคืออะไร และ store ตัวไหนรับประกันให้ฟรี?
 3. ทำไมการ push พร้อมกันสองครั้งจึง race seq counter บน KV ได้ แต่บน Durable Object ไม่ได้?
-4. `PUBLIC_SYNC_URL` ถูก bake เข้าไปตอน build อะไรต้องเกิดขึ้นเพื่อให้ client เริ่มคุยกับ server ที่ deploy แล้ว และทำไมมันจึงไม่ใช่ค่า runtime?
+4. `PUBLIC_SYNC_URL` ถูก bake เข้าไปตอน build อะไรต้องเกิดขึ้นเพื่อให้ client เริ่มคุยกับ server ที่ deploy แล้ว และทำไมจึงไม่ใช่ค่า runtime?
 
-## Recap
+## สรุป
 
-คุณย้าย sync server ออกจาก `localhost`: Hono Worker ที่ relay ops โดยมี Durable Object ต่อ note หนุนหลัง ซึ่งทำให้ append-only log durable และ seq ของมัน monotonic ภายใต้ concurrency — พร้อมโชว์ KV เป็นทางเลือกที่ง่ายกว่าและตั้งชื่อ race ของมันอย่างซื่อตรง เมื่อ `PUBLIC_SYNC_URL` ถูกชี้ใหม่ อุปกรณ์จริงสองเครื่องก็ sync กันได้แบบ conflict-free บน edge แล้ว OfflineNotes deploy ครบสมบูรณ์แล้ว
+คุณย้าย sync server ออกจาก `localhost`: Hono Worker ที่ relay ops โดยมี Durable Object ต่อ note หนุนหลัง ที่ทำให้ append-only log durable และ seq monotonic ภายใต้ concurrency — พร้อมโชว์ KV เป็นทางเลือกที่ง่ายกว่าและตั้งชื่อ race ที่มีอย่างซื่อตรง เมื่อ `PUBLIC_SYNC_URL` ถูกชี้ใหม่ อุปกรณ์จริงสองเครื่องก็ sync กันได้แบบ conflict-free บน edge แล้ว OfflineNotes deploy ครบสมบูรณ์แล้ว
 
 ต่อไป ถอยออกมามองภาพรวม: [Wrap-up →](/offlinenotes/th/wrap-up/)

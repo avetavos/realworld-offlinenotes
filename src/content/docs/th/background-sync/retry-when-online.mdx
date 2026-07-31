@@ -5,19 +5,19 @@ sidebar:
   order: 2
 ---
 
-[บทที่แล้ว](/offlinenotes/th/background-sync/deferring-sync/) register tag `sync-notes` ขณะ offline ตอนนี้เราตอบ browser เมื่อมัน fire เมื่อ connectivity กลับมา browser dispatch **`sync` event** ใน Service Worker — แม้ปิดทุก tab แล้ว — และ handler นั้น drain `outbox` ด้วยการ POST ไป sync server ถ้า push ล้มเหลว เรา reject แล้ว browser retry เองตามตารางของมัน
+[บทที่แล้ว](/offlinenotes/th/background-sync/deferring-sync/) register tag `sync-notes` ขณะ offline ตอนนี้เราตอบ browser เมื่อ event นั้น fire เมื่อ connectivity กลับมา browser dispatch **`sync` event** ใน Service Worker — แม้ปิดทุก tab แล้ว — และ handler นั้น drain `outbox` ด้วยการ POST ไป sync server ถ้า push ล้มเหลว เรา reject แล้ว browser retry เองตามตารางของตัวเอง
 
 เพราะ Background Sync มีแค่บน Chromium เราจึงต่อสาย fallback ตรง ๆ สำหรับ Firefox และ Safari ด้วย: retry บน `online` event และเมื่อ tab กลับมา visible อีกครั้ง drain เดียวกัน trigger ต่างกัน
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 สองอย่าง อย่างแรก handler `sync` ใน `sw.js` และ `drainOutbox()` ที่ self-contained ซึ่งอ่าน `outbox` แล้ว post op ของแต่ละ note ไป `POST /docs/:id/ops` อย่างที่สอง fallback ฝั่ง client ที่รัน push logic เดียวกันบน `online` / `visibilitychange` สำหรับ browser ที่ไม่มี Background Sync
 
-## Why
+## ทำไม
 
-Service Worker คือที่ที่ถูกต้องสำหรับ drain queue พอดีเพราะมันอยู่นานกว่า page user ที่แก้สาม note บนรถไฟ ปิด tab แล้วโผล่มาที่สถานี ได้ op พวกนั้นถูกส่งมอบโดยไม่ต้องเปิด app ขึ้นมาใหม่เลย — worker ตื่น, drain, แล้วหลับ ดีไซน์นี้ยังพึ่งการรับประกันหนึ่งข้อ: **`event.waitUntil()` ทำให้ worker มีชีวิตอยู่จน promise settle และการ reject บอก browser ให้ retry sync ทีหลังพร้อม backoff** ดังนั้น "server ยังเข้าไม่ถึง" ไม่ต้องมี code ของเราเลย — เราแค่ throw แล้ว platform reschedule ให้ fallback มีอยู่เพราะการรับประกันของ platform นั้นไม่ได้มีอยู่ทุกที่ ที่ไหนที่มันขาด page-level listener คือสิ่งมากสุดที่เราเสนอได้อย่างซื่อตรง
+Service Worker คือที่ที่ถูกต้องสำหรับ drain queue พอดีเพราะอยู่นานกว่า page user ที่แก้สาม note บนรถไฟ ปิด tab แล้วโผล่มาที่สถานี ได้ op พวกนั้นถูกส่งมอบโดยไม่ต้องเปิด app ขึ้นมาใหม่เลย — worker ตื่น, drain, แล้วหลับ ดีไซน์นี้ยังพึ่งการรับประกันหนึ่งข้อ: **`event.waitUntil()` ทำให้ worker มีชีวิตอยู่จน promise settle และการ reject บอก browser ให้ retry sync ทีหลังพร้อม backoff** ดังนั้น "server ยังเข้าไม่ถึง" ไม่ต้องมี code ของเราเลย — เราแค่ throw แล้ว platform reschedule ให้ fallback มีอยู่เพราะการรับประกันของ platform นั้นไม่ได้มีอยู่ทุกที่ ที่ไหนที่ขาดไป page-level listener คือสิ่งมากสุดที่เราเสนอได้อย่างซื่อตรง
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **Service Worker `sync` event vs. a page-level retry loop**
 
@@ -27,13 +27,13 @@ Service Worker คือที่ที่ถูกต้องสำหรั�
 **`online`/visibility fallback vs. requiring Background Sync**
 
 - **Pros:** ทำงานในทุก browser วันนี้ รวมถึง Safari และ Firefox ไม่มี user คนไหนติดค้างกับ queue ที่ส่งมอบไม่ได้
-- **Cons:** มัน fire เฉพาะตอนมี tab มีชีวิต — ปิด app ตอน offline แล้วไม่มีอะไร retry จนคุณเปิดมันใหม่ มันเป็นตาข่ายกันตก ไม่ใช่ตัวแทน
+- **Cons:** fire เฉพาะตอนมี tab มีชีวิต — ปิด app ตอน offline แล้วไม่มีอะไร retry จนคุณเปิดขึ้นมาใหม่ นี่เป็นตาข่ายกันตก ไม่ใช่ตัวแทน
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `apps/web/public/sw.js`
 
-เพิ่ม listener `sync` และ drain ที่ self-contained `sw.js` เขียนมือ (ไม่มี Workbox) และถูก copy แบบ verbatim มันจึง import TypeScript ของ app ไม่ได้ — เราเปิด IndexedDB ด้วย raw API แล้วใช้ shape `outbox` เดียวกันจาก Module 3 ซ้ำ: `{ seq, noteId, op }`
+เพิ่ม listener `sync` และ drain ที่ self-contained `sw.js` เขียนมือ (ไม่มี Workbox) และถูก copy แบบ verbatim จึง import TypeScript ของ app ไม่ได้ — เราเปิด IndexedDB ด้วย raw API แล้วใช้ shape `outbox` เดียวกันจาก Module 3 ซ้ำ: `{ seq, noteId, op }`
 
 ```js
 // apps/web/public/sw.js (additions)
@@ -107,7 +107,7 @@ function idbDelete(db, store, keys) {
 
 ### 2. `apps/web/src/background-sync.ts`
 
-เพิ่ม fallback สำหรับ browser ที่ไม่มี Background Sync มันใช้ `pushOutbox` จาก Module 10 ซ้ำ — delivery logic ตัวเดียวกันเป๊ะ แค่ trigger จาก page แทนที่จะจาก worker
+เพิ่ม fallback สำหรับ browser ที่ไม่มี Background Sync โดยใช้ `pushOutbox` จาก Module 10 ซ้ำ — delivery logic ตัวเดียวกันเป๊ะ แค่ trigger จาก page แทนที่จะจาก worker
 
 ```ts
 // apps/web/src/background-sync.ts (additions)
@@ -132,7 +132,7 @@ export function installOnlineFallback(): void {
 
 เรียก `installOnlineFallback()` หนึ่งครั้งจาก entry ของ app ทันทีหลัง register Service Worker
 
-## Verify
+## ตรวจสอบผล
 
 โดยให้ server ทั้งสองรันอยู่ (`pnpm --filter sync dev`, `pnpm --filter web dev`) ทดสอบ path ของ Chromium ก่อน:
 
@@ -165,10 +165,10 @@ pnpm --filter web build
 ตรวจสอบความเข้าใจ:
 
 1. ทำไมการ throw ภายใน `drainOutbox()` จึงให้พฤติกรรม retry ที่เราต้องการ และ `event.waitUntil()` มีบทบาทอะไรในนั้น?
-2. การ drain ลบ op ตาม `seq` ต่อ note แทนที่จะล้างทั้ง `outbox` มันป้องกัน bug อะไรเมื่อ edit มาถึงกลาง push?
+2. การ drain ลบ op ตาม `seq` ต่อ note แทนที่จะล้างทั้ง `outbox` ป้องกัน bug อะไรเมื่อ edit มาถึงกลาง push?
 3. ทำไม `sw.js` ถึง import `idb` wrapper ที่ส่วนที่เหลือของ app ใช้ตรง ๆ ไม่ได้?
-4. fallback ฟังบน `online` และ `visibilitychange` มันไม่ครอบคลุม failure mode แบบไหนที่ native Background Sync ครอบคลุม?
+4. fallback ฟังบน `online` และ `visibilitychange` ไม่ครอบคลุม failure mode แบบไหนที่ native Background Sync ครอบคลุม?
 
-## Recap
+## สรุป
 
 sync ตอนนี้เกิดขึ้นโดยไม่ต้องมีคุณ `sync` event ของ Service Worker drain `outbox` เมื่อ network กลับมา แล้วปล่อยให้ browser retry เมื่อล้มเหลว ที่ไหนที่ Background Sync ไม่มี fallback แบบ `online`/visibility รัน push เดียวกันจาก page การส่งมอบในที่สุดก็ทนทานเท่ากับการเขียนในเครื่องที่ทนทานมาตลอด ต่อไป เอา CRDT promise ทั้งหมดมาทดสอบใน [Conflict-free Merge →](/offlinenotes/th/merge-practice/): สอง device แก้ note เดียวกันตอน offline converge โดยไม่มี conflict prompt

@@ -5,16 +5,16 @@ sidebar:
   order: 2
 ---
 
-ตอนนี้ op ไหลออกจากทุก edit แล้ว แต่มันหายไปตอน reload บทนี้ทำให้ document คงทน: **snapshot** ของ CRDT ทั้งก้อนไปที่ `docs` store, แต่ละ **op** ถูก queue ไว้ใน `outbox`, และการเปิด note ซ้ำจะสร้างมันขึ้นใหม่ด้วย `NoteDoc.fromSnapshot`
+ตอนนี้ op ไหลออกจากทุก edit แล้ว แต่หายไปตอน reload บทนี้ทำให้ document คงทน: **snapshot** ของ CRDT ทั้งก้อนไปที่ `docs` store, แต่ละ **op** ถูก queue ไว้ใน `outbox`, และการเปิด note ซ้ำจะสร้างขึ้นใหม่ด้วย `NoteDoc.fromSnapshot`
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 write path สองเส้นและ read path หนึ่งเส้น ทั้งหมดผ่าน typed `db.ts` wrapper จาก IndexedDB module:
 
 - **ทุกครั้งที่ edit** — persist snapshot ใหม่ไปที่ `docs` (state ที่เป็นทางการ) และ append op ที่ return มาไปที่ `outbox` (queue ที่ยังไม่ sync) แล้ว refresh projection ของ `notes` list
 - **ตอนเปิด** — อ่าน record ของ note จาก `docs` แล้วสร้าง document ที่มีชีวิตขึ้นใหม่ด้วย `NoteDoc.fromSnapshot(actorId, snapshot)`
 
-editor ยังคง render จาก `title()` และ `text()` เหมือนเดิมเป๊ะ; มันไม่รู้เลยว่ามีการ persist เกิดขึ้น
+editor ยังคง render จาก `title()` และ `text()` เหมือนเดิมเป๊ะ; ไม่รู้เลยว่ามีการ persist เกิดขึ้น
 
 ```mermaid
 flowchart TD
@@ -25,15 +25,15 @@ flowchart TD
     Docs -->|"getDoc + fromSnapshot"| Reload["reopen note"]
 ```
 
-## Why
+## ทำไม
 
-เราเก็บ **สอง representation อย่างตั้งใจ** เพราะทั้งสองตอบคำถามที่ต่างกัน snapshot ตอบว่า "ตอนนี้ note นี้พูดว่าอะไร *เดี๋ยวนี้*?" — มันคือสิ่งที่เรา load เพื่อแสดง note ทันทีโดยไม่ต้อง replay ประวัติ ส่วน outbox ตอบว่า "ฉันแก้อะไรไปบ้างที่ server ยังไม่เห็น?" — มันคือ op stream เป๊ะ ๆ ที่เราจะ push ใน sync module
+เราเก็บ **สอง representation อย่างตั้งใจ** เพราะทั้งสองตอบคำถามที่ต่างกัน snapshot ตอบว่า "ตอนนี้ note นี้พูดว่าอะไร *เดี๋ยวนี้*?" — นี่คือสิ่งที่เรา load เพื่อแสดง note ทันทีโดยไม่ต้อง replay ประวัติ ส่วน outbox ตอบว่า "ฉันแก้อะไรไปบ้างที่ server ยังไม่เห็น?" — นั่นคือ op stream เป๊ะ ๆ ที่เราจะ push ใน sync module
 
-เราเก็บแค่ op log แล้ว replay มันได้ไหม? ได้ และดีไซน์แบบ pure event-sourced ก็ทำแบบนั้น แต่การ replay ทุก op ตั้งแต่ตอนสร้างเพื่อเปิด note จะช้าลงเรื่อย ๆ ทุกครั้งที่ edit และหัวใจของ local-first คือการเปิด note ต้องทันทีและ offline ได้ snapshot คือ cache ของ state ที่พับเก็บไว้แล้ว; outbox คือส่วนหางที่เรายังติดค้าง network อยู่ การเก็บทั้งสองคือทางสายกลางที่ practical: อ่านเร็ว *และ* มี sync record ที่แม่นยำ
+เราเก็บแค่ op log แล้ว replay ได้ไหม? ได้ และดีไซน์แบบ pure event-sourced ก็ทำแบบนั้น แต่การ replay ทุก op ตั้งแต่ตอนสร้างเพื่อเปิด note จะช้าลงเรื่อย ๆ ทุกครั้งที่ edit และหัวใจของ local-first คือการเปิด note ต้องทันทีและ offline ได้ snapshot คือ cache ของ state ที่พับเก็บไว้แล้ว; outbox คือส่วนหางที่เรายังติดค้าง network อยู่ การเก็บทั้งสองคือทางสายกลางที่ practical: อ่านเร็ว *และ* มี sync record ที่แม่นยำ
 
-`fromSnapshot` คือสิ่งที่ทำให้ snapshot เชื่อถือได้ เพราะมันสร้าง `NoteDoc` ขึ้นใหม่ด้วย actor id *ตัวเดียวกัน* และ counter ภายในเดิม edit ที่ทำหลัง reload จึงผลิต op ที่เข้าล็อกถูกที่ใน causal history เดียวกัน — note ที่กู้กลับมาแยกไม่ออกจาก note ที่ไม่เคยถูกปิดเลย
+`fromSnapshot` คือสิ่งที่ทำให้ snapshot เชื่อถือได้ เพราะสร้าง `NoteDoc` ขึ้นใหม่ด้วย actor id *ตัวเดียวกัน* และ counter ภายในเดิม edit ที่ทำหลัง reload จึงผลิต op ที่เข้าล็อกถูกที่ใน causal history เดียวกัน — note ที่กู้กลับมาแยกไม่ออกจาก note ที่ไม่เคยถูกปิดเลย
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **persist snapshot ทุกครั้งที่ edit เทียบกับ persist แค่ op log**
 
@@ -42,10 +42,10 @@ flowchart TD
 
 **outbox queue แยกต่างหาก เทียบกับ derive op ที่ยังไม่ sync ออกจาก snapshot ตอน push**
 
-- **Pros:** outbox เป็น record แบบ explicit เรียงลำดับ และ append-only ของสิ่งที่ต้องส่งเป๊ะ ๆ; การ drain มันเรียบง่ายและเป็นมิตรกับ idempotent
-- **Cons:** มันเป็น store ตัวที่สองที่ต้องรักษาให้ consistent กับ `docs` — write ทั้งสองควรเกิดพร้อมกัน ไม่งั้น crash ระหว่างสองอันอาจทำ op หลุดจาก queue ในขณะที่ยังคงอยู่ใน state
+- **Pros:** outbox เป็น record แบบ explicit เรียงลำดับ และ append-only ของสิ่งที่ต้องส่งเป๊ะ ๆ; การ drain ทำได้เรียบง่ายและเป็นมิตรกับ idempotent
+- **Cons:** เป็น store ตัวที่สองที่ต้องรักษาให้ consistent กับ `docs` — write ทั้งสองควรเกิดพร้อมกัน ไม่งั้น crash ระหว่างสองอันอาจทำ op หลุดจาก queue ทั้งที่ยังคงอยู่ใน state
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `apps/web/src/db.ts` — the accessors we rely on
 
@@ -108,7 +108,7 @@ async function persist(id: string, actorId: string, doc: NoteDoc, ops: Op[]) {
 
 ### 3. `apps/web/src/store.ts` — open from snapshot
 
-`openNote` อ่าน `docs`; ถ้ามี record อยู่ มันสร้างใหม่ด้วย `fromSnapshot` ไม่งั้นเริ่ม `NoteDoc` ใหม่สด ๆ ตอนนี้ edit method จะ `await persist(...)` ก่อน fire `onChange`
+`openNote` อ่าน `docs`; ถ้ามี record อยู่ ก็สร้างใหม่ด้วย `fromSnapshot` ไม่งั้นเริ่ม `NoteDoc` ใหม่สด ๆ ตอนนี้ edit method จะ `await persist(...)` ก่อน fire `onChange`
 
 ```ts
 export async function openNote(id: string, onChange: () => void): Promise<OpenNote> {
@@ -138,9 +138,9 @@ export async function openNote(id: string, onChange: () => void): Promise<OpenNo
 }
 ```
 
-> ตอนนี้ edit method เป็น async แล้ว (มัน await IndexedDB) ให้ editor `await note.insertText(...)` เพื่อไม่ให้การกดคีย์หายถ้าสอง edit แข่งกัน; IndexedDB write ถูก queue ไว้ แต่ `doc` ใน memory ของคุณต้องคงเป็นผู้มีอำนาจตัดสินลำดับ
+> ตอนนี้ edit method เป็น async แล้ว (เพราะ await IndexedDB) ให้ editor `await note.insertText(...)` เพื่อไม่ให้การกดคีย์หายถ้าสอง edit แข่งกัน; IndexedDB write ถูก queue ไว้ แต่ `doc` ใน memory ของคุณต้องคงเป็นผู้มีอำนาจตัดสินลำดับ
 
-## Verify
+## ตรวจสอบผล
 
 build WASM package และ app แล้วพิสูจน์ความคงทนด้วยมือ ใน DevTools console:
 
@@ -174,8 +174,8 @@ pnpm --filter web build
 1. ทำไมถึงเก็บทั้ง snapshot ใน `docs` และ op ใน `outbox` แทนที่จะเก็บแค่อย่างใดอย่างหนึ่ง?
 2. `NoteDoc.fromSnapshot(actorId, snapshot)` สร้างอะไรขึ้นใหม่ที่ `new NoteDoc(actorId)` สด ๆ จะไม่มี?
 3. ทำไม snapshot write และ outbox append ควรเกิดพร้อมกันสำหรับ edit ครั้งเดียว?
-4. อะไรใน snapshot ที่เก็บไว้โตแบบไม่มีขอบเขต และเทคนิคใดในภายหลัง (ที่ตั้งชื่อไว้ใน CRDT module) จะจำกัดขอบเขตมันได้?
+4. อะไรใน snapshot ที่เก็บไว้โตแบบไม่มีขอบเขต และเทคนิคใดในภายหลัง (ที่ตั้งชื่อไว้ใน CRDT module) จะจำกัดขอบเขตได้?
 
-## Recap
+## สรุป
 
-ตอนนี้ note คงทนแล้ว: ทุก edit save snapshot ของมันไป `docs` queue op ของมันไว้ใน `outbox` และ refresh projection ของ `notes`; การเปิดซ้ำสร้าง document เดิมขึ้นใหม่เป๊ะ ๆ ด้วย `fromSnapshot` outbox คือ record ที่แม่นยำของสิ่งที่เรายังติดค้าง network — แต่ยังไม่มีอะไรอ่านมัน และ app ยังต้องมี server ที่ live ถึงจะทำงานได้ ต่อไป [Service Worker (Offline) →](/offlinenotes/th/service-worker/) ทำให้ app shell เองโหลดได้โดยไม่มี network เพื่อให้ OfflineNotes รัน offline ได้จริง
+ตอนนี้ note คงทนแล้ว: ทุก edit save snapshot ไป `docs` queue op ไว้ใน `outbox` และ refresh projection ของ `notes`; การเปิดซ้ำสร้าง document เดิมขึ้นใหม่เป๊ะ ๆ ด้วย `fromSnapshot` outbox คือ record ที่แม่นยำของสิ่งที่เรายังติดค้าง network — แต่ยังไม่มีอะไรอ่าน และ app ยังต้องมี server ที่ live ถึงจะทำงานได้ ต่อไป [Service Worker (Offline) →](/offlinenotes/th/service-worker/) ทำให้ app shell เองโหลดได้โดยไม่มี network เพื่อให้ OfflineNotes รัน offline ได้จริง

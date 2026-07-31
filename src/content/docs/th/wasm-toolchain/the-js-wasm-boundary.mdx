@@ -5,21 +5,21 @@ sidebar:
   order: 2
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
-[บทก่อน](/offlinenotes/th/wasm-toolchain/wasm-bindgen-basics/) ส่งแค่ number กับ string ข้าม boundary CRDT ต้องยื่น **op** ทั้งก้อนให้ JavaScript — record แบบ tagged เช่น insert หรือ delete — และรับ batch ของมันกลับมา merge บทนี้ต่อสาย `serde-wasm-bindgen` เพื่อให้ Rust `enum` กลายเป็น JS object ธรรมดาและกลับมาได้ และปักหมุดชัด ๆ ว่าอะไร copy ข้ามเส้น และใครรับผิดชอบ free อะไร
+[บทก่อน](/offlinenotes/th/wasm-toolchain/wasm-bindgen-basics/) ส่งแค่ number กับ string ข้าม boundary CRDT ต้องยื่น **op** ทั้งก้อนให้ JavaScript — record แบบ tagged เช่น insert หรือ delete — และรับ batch กลับมา merge บทนี้ต่อสาย `serde-wasm-bindgen` เพื่อให้ Rust `enum` กลายเป็น JS object ธรรมดาและกลับมาได้ และปักหมุดชัด ๆ ว่าอะไร copy ข้ามเส้น และใครรับผิดชอบ free อะไร
 
-เราจะนิยาม type `Op` ที่แอปทั้งหมดสร้างขึ้นรอบ ๆ — shape เดียวกับที่เก็บใน IndexedDB และ push ไป sync server — แล้วพิสูจน์ว่ามัน round-trip ได้ CRDT ที่ *ผลิต* op เหล่านี้จะมาใน module ถัดไป; ที่นี่เราทำ wire format ให้แน่นก่อน
+เราจะนิยาม type `Op` ที่แอปทั้งหมดสร้างขึ้นรอบ ๆ — shape เดียวกับที่เก็บใน IndexedDB และ push ไป sync server — แล้วพิสูจน์ว่า round-trip ได้ CRDT ที่ *ผลิต* op เหล่านี้จะมาใน module ถัดไป; ที่นี่เราทำ wire format ให้แน่นก่อน
 
-## Why
+## ทำไม
 
-wasm-bindgen marshal primitive และ string ได้เอง แต่ Rust struct หรือ enum ไม่มี representation ที่เป็นธรรมชาติใน JavaScript — memory layout ของมันเป็นเรื่องของ Rust คุณมีสองทางข้าม: serialize เป็น JSON **string** แล้ว `JSON.parse` อีกฝั่ง หรือ convert ตรงเป็น **JS value** (object, array, number) โดยไม่มี string คั่นกลาง `serde-wasm-bindgen` ทำอย่างหลัง และมันถูกต้อง: ไม่มี double-encoding, โค้ดเล็กกว่า และผลลัพธ์เป็น JS object ที่ note store ตรวจได้ทันที
+wasm-bindgen marshal primitive และ string ได้เอง แต่ Rust struct หรือ enum ไม่มี representation ที่เป็นธรรมชาติใน JavaScript — memory layout เป็นเรื่องภายในของ Rust คุณมีสองทางข้าม: serialize เป็น JSON **string** แล้ว `JSON.parse` อีกฝั่ง หรือ convert ตรงเป็น **JS value** (object, array, number) โดยไม่มี string คั่นกลาง `serde-wasm-bindgen` ทำอย่างหลัง และเป็นทางที่ถูก: ไม่มี double-encoding, โค้ดเล็กกว่า และผลลัพธ์เป็น JS object ที่ note store ตรวจได้ทันที
 
 op format เป็น enum แบบ **internally tagged**: ทุก op เป็น object ที่มี discriminator `t` — `` `{ "t": "ins", ... }` ``, `` `{ "t": "del", ... }` ``, `` `{ "t": "title", ... }` `` `#[serde(tag = "t")]` ของ serde ผลิตออกมาแบบนั้นเป๊ะ และ serde-wasm-bindgen เข้าใจ tagging เดียวกันตอนขากลับ นิยาม Rust เดียวขับทั้งสองทิศ
 
-อีกครึ่งคือ ownership Rust struct ที่ export ไป JS (เช่น `NoteDoc`) อยู่บน WASM heap และเข้าถึงผ่าน pointer ที่ JS object ถือ; **op ต่างออกไป** — มันเป็น *copy* ที่ถูก serialize เป็น JS data ธรรมดาที่ไม่มี Rust lifetime ผูกอยู่ การรู้ว่าอันไหนเป็นอันไหนบอกคุณว่าเมื่อไหร่ต้องเรียก `.free()` และเมื่อไหร่ garbage collector จัดการให้แล้ว
+อีกครึ่งคือ ownership Rust struct ที่ export ไป JS (เช่น `NoteDoc`) อยู่บน WASM heap และเข้าถึงผ่าน pointer ที่ JS object ถือ; **op ต่างออกไป** — เพราะเป็น *copy* ที่ถูก serialize เป็น JS data ธรรมดาที่ไม่มี Rust lifetime ผูกอยู่ การรู้ว่าอันไหนเป็นอันไหนบอกคุณว่าเมื่อไหร่ต้องเรียก `.free()` และเมื่อไหร่ garbage collector จัดการให้แล้ว
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **`serde-wasm-bindgen` vs JSON strings across the boundary**
 - **Pros:** ไม่มี `JSON.stringify`/`parse` ทั้งสองฝั่ง; convert ตรงเป็น JS object/array; โค้ด generate เล็กกว่าและงานต่อ op น้อยกว่า ค่าที่คุณได้ใน JS ใช้ได้ทันที
@@ -27,9 +27,9 @@ op format เป็น enum แบบ **internally tagged**: ทุก op เป
 
 **Copying ops across vs handing JS a pointer to a live Rust value**
 - **Pros of copying:** ฝั่ง JS ได้ data ที่ GC จัดการเองแบบเป็นอิสระ เก็บใน IndexedDB หรือส่งข้าม network ได้โดยไม่กังวลเรื่อง Rust lifetime; ไม่มี `.free()` ให้จำ
-- **Cons of copying:** ทุกการข้าม serialize และ allocate สำหรับ batch ใหญ่นั่นเป็นงานจริง — เราจึงข้าม boundary เป็น **batch** (array ของ op ทั้งชุดต่อ call) ไม่ใช่ทีละตัวอักษร เพื่อ amortize มัน
+- **Cons of copying:** ทุกการข้าม serialize และ allocate สำหรับ batch ใหญ่นั่นเป็นงานจริง — เราจึงข้าม boundary เป็น **batch** (array ของ op ทั้งชุดต่อ call) ไม่ใช่ทีละตัวอักษร เพื่อ amortize ต้นทุนนั้น
 
-## Set it up
+## ติดตั้ง
 
 ### 1. `crates/crdt/Cargo.toml` — add serde
 
@@ -42,7 +42,7 @@ serde-wasm-bindgen = "0.6"
 
 ### 2. `crates/crdt/src/lib.rs` — the `Op` type
 
-element id กับ timestamp ต่างเป็น pair `(counter, actor)` — Rust tuple ซึ่ง serde serialize เป็น JS array สองสมาชิก `` `[counter, actor]` `` เรา alias มันเพื่อให้อ่านง่าย `#[serde(tag = "t")]` และ `rename` ต่อ variant ผลิต wire shape เป๊ะที่คอร์สที่เหลือพึ่งพา
+element id กับ timestamp ต่างเป็น pair `(counter, actor)` — Rust tuple ซึ่ง serde serialize เป็น JS array สองสมาชิก `` `[counter, actor]` `` เรา alias ไว้เพื่อให้อ่านง่าย `#[serde(tag = "t")]` และ `rename` ต่อ variant ผลิต wire shape เป๊ะที่คอร์สที่เหลือพึ่งพา
 
 ```rust
 use wasm_bindgen::prelude::*;
@@ -72,7 +72,7 @@ pub enum Op {
 
 ### 3. Cross the boundary: `to_value` / `from_value`
 
-`serde_wasm_bindgen::to_value(&value)` รับ **reference** — มันอ่านค่า Rust ของคุณแล้วสร้าง JS value ใหม่ ทิ้งตัวเดิมให้ Rust เป็นเจ้าของ `from_value(js)` **consume** `JsValue` แล้วผลิต Rust data ที่เป็นเจ้าของ; การใช้ `?` เปลี่ยน shape ที่ผิดให้เป็น JS error ที่ throw สังเกตว่า `from_value` ให้คุณเป็น *copy* — `Vec<Op>` ที่คืนมาเป็นอิสระจากอะไรก็ตามที่ JS ยังถืออยู่
+`serde_wasm_bindgen::to_value(&value)` รับ **reference** — อ่านค่า Rust ของคุณแล้วสร้าง JS value ใหม่ ทิ้งตัวเดิมให้ Rust เป็นเจ้าของ `from_value(js)` **consume** `JsValue` แล้วผลิต Rust data ที่เป็นเจ้าของ; การใช้ `?` เปลี่ยน shape ที่ผิดให้เป็น JS error ที่ throw สังเกตว่า `from_value` ให้คุณเป็น *copy* — `Vec<Op>` ที่คืนมาเป็นอิสระจากอะไรก็ตามที่ JS ยังถืออยู่
 
 ```rust
 /// Rust → JS: returns an array of ops as a live JS value.
@@ -96,7 +96,7 @@ pub fn count_ops(val: JsValue) -> Result<usize, JsValue> {
 
 ### 4. `apps/web/src/boundary-smoke.ts` — round-trip from TypeScript
 
-object ที่คุณได้จาก `demo_ops()` เป็น JS ธรรมดาที่คุณ log, store หรือส่งได้ ยื่นมันกลับให้ `count_ops` ตรง ๆ แล้วมัน deserialize สะอาด เพราะทั้งสองทิศอ่านนิยาม serde เดียวกัน
+object ที่คุณได้จาก `demo_ops()` เป็น JS ธรรมดาที่คุณ log, store หรือส่งได้ ยื่นกลับให้ `count_ops` ตรง ๆ แล้ว deserialize ได้สะอาด เพราะทั้งสองทิศอ่านนิยาม serde เดียวกัน
 
 ```ts
 import init, { demo_ops, count_ops } from '../../crates/crdt/pkg/crdt.js';
@@ -115,7 +115,7 @@ export async function boundarySmoke(): Promise<void> {
 
 Ownership ในบรรทัดเดียว: `ops` ตรงนี้คือ JS data ที่ GC จัดการ — ไม่มี `.free()` ส่วน `NoteDoc` (module ถัดไป) จะเป็น JS handle สู่ *live Rust struct* และตัวนั้นคุณต้อง `.free()`
 
-## Verify
+## ตรวจสอบผล
 
 Build crate เพื่อให้ export ใหม่ลงใน `pkg/`:
 
@@ -162,7 +162,7 @@ test result: ok. 1 passed; 0 failed
 3. `to_value` รับ `&T` แต่ `from_value` รับ `JsValue` แบบ by value นั่นบอกอะไรคุณเกี่ยวกับว่าฝั่งไหนเป็นเจ้าของ data หลังจากนั้น?
 4. `Vec<Op>` ที่คืนจาก `from_value` ไม่ต้อง `.free()` แต่ handle `NoteDoc` ต้อง ทำไมจึงต่างกัน?
 
-## Recap
+## สรุป
 
 เรานิยาม enum `Op` — wire format ของแอป — และย้าย batch ของ op ทั้งชุดข้าม boundary ด้วย `serde_wasm_bindgen::to_value`/`from_value` โดยไม่มี JSON string คั่นกลาง เราปักหมุด ownership: op เป็น copy ที่ GC จัดการ; Rust struct ที่ export เป็น live handle ที่คุณ free การข้ามเป็น batch ทำให้ต้นทุน copy ถูก amortize
 
