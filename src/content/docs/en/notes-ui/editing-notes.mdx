@@ -171,11 +171,16 @@ customElements.define('note-editor', NoteEditor);
 
 ### 3. `apps/web/src/components/offline-notes-app.ts` — wire "New"
 
-Give the root a way to start a note by delegating to the editor.
+Give the root a way to start a note by delegating to the editor. Keep the imports from [IndexedDB Foundation](/offlinenotes/en/indexeddb/) and [App Shell](/offlinenotes/en/app-shell/) — this is the whole file, and dropping them would stop `note-list`/`note-editor` from ever registering.
 
 ```ts
+import { getDb } from '../db';
+import './note-list';
+import './note-editor';
+
 class OfflineNotesApp extends HTMLElement {
   connectedCallback() {
+    void getDb(); // fire-and-forget: opens (and upgrades) the DB once, early
     this.innerHTML = `
       <header><button class="new" type="button">New note</button></header>
       <note-list></note-list>

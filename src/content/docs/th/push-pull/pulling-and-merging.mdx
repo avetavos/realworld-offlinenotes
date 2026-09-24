@@ -21,7 +21,7 @@ cursor คือสิ่งที่ทำให้ pull ถูกและถ�
 
 **Merge-then-persist-snapshot vs replaying the whole op log**
 
-- **Pros:** เราเก็บ snapshot ที่ authoritative หนึ่งอันต่อ note ใน `docs` แล้วพับ op ใหม่เข้าไปทีละส่วน การ reload คือ `fromSnapshot` ไม่ใช่ replay ทั้งหมด — เร็วและถูกจำกัดด้วยขนาด note ไม่ใช่ความยาวของ history
+- **Pros:** เราเก็บ snapshot ที่ authoritative หนึ่งอันต่อ note ใน `docs` แล้วพับ op ใหม่เข้าไปทีละส่วน การ reload คือ `from_snapshot` ไม่ใช่ replay ทั้งหมด — เร็วและถูกจำกัดด้วยขนาด note ไม่ใช่ความยาวของ history
 - **Cons:** snapshot เป็น derived state ที่เราต้องคอยให้ตรงจังหวะกับ cursor persist snapshot และ advance `pulled:<noteId>` ไปด้วยกัน ไม่งั้น crash ระหว่างสองอย่างนี้จะ re-merge op ไม่กี่ตัวในครั้งถัดไป (ไม่เป็นไร ต้องขอบคุณ idempotence — แต่ควรเข้าใจไว้)
 
 **Re-render via an event vs the store calling the UI directly**
@@ -36,7 +36,7 @@ cursor คือสิ่งที่ทำให้ pull ถูกและถ�
 เพิ่ม `pull` ข้าง ๆ `push` โดย `NoteDoc` และ `init()` ถูกโหลดไว้แล้วตอน app boot (ดู [Wiring the WASM Core →](/offlinenotes/th/wiring-wasm/)) ตรงนี้เราจึงแค่สร้างจาก snapshot ที่เก็บไว้แล้ว merge
 
 ```ts
-import { NoteDoc } from '../../crates/crdt/pkg/crdt.js';
+import { NoteDoc } from '../../../crates/crdt/pkg/crdt.js';
 import { getDoc, putDoc, putNote, getMeta, setMeta } from './db';
 
 const SYNC_URL = import.meta.env.PUBLIC_SYNC_URL ?? 'http://localhost:8787';
@@ -56,7 +56,7 @@ export async function pull(noteId: string): Promise<void> {
 
   // Rebuild the note from its snapshot and fold in the remote ops.
   const record = await getDoc(noteId); // { id, actorId, snapshot }
-  const doc = NoteDoc.fromSnapshot(record.actorId, record.snapshot);
+  const doc = NoteDoc.from_snapshot(record.actorId, record.snapshot);
 
   doc.merge(ops.map((entry) => entry.op)); // the conflict-free step
 

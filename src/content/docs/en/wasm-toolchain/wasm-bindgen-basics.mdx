@@ -105,7 +105,7 @@ wasm-pack build --target web
 Call both exports from TypeScript. The default export is `init` — you must `await` it once before any other call, because it's what fetches and instantiates the `.wasm` binary. The path reaches out of `apps/web` into the built `pkg/`.
 
 ```ts
-import init, { version, Clock } from '../../crates/crdt/pkg/crdt.js';
+import init, { version, Clock } from '../../../crates/crdt/pkg/crdt.js';
 
 export async function smokeTest(): Promise<void> {
   await init(); // fetch + instantiate the .wasm — required before any call

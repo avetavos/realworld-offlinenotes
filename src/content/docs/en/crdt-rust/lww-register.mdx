@@ -146,18 +146,23 @@ cd crates/crdt
 wasm-pack build --target web
 ```
 
-The real test is convergence: two docs set the title concurrently, exchange ops, and must end identical **regardless of who they think wrote last**. Because the tie-break falls to the actor id, the higher actor id ("B") wins any counter tie — and both replicas agree. Add this and run `cargo test`:
+This test crosses the JS↔WASM boundary — `set_title` returns a `JsValue` — so it has to run inside an actual WASM engine; plain `cargo test` runs natively and panics with "cannot call wasm-bindgen imported functions on non-wasm targets" the moment it touches one. Add `wasm-bindgen-test` under `[dev-dependencies]` so `wasm-pack test --node` can run it in Node instead:
+
+```toml
+[dev-dependencies]
+serde_json = "1"
+wasm-bindgen-test = "0.3"
+```
+
+The real test is convergence: two docs set the title concurrently, exchange ops, and must end identical **regardless of who they think wrote last**. Because the tie-break falls to the actor id, the higher actor id ("B") wins any counter tie — and both replicas agree. Add this test and run it with `wasm-pack test --node`:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-    fn ops_from(js: wasm_bindgen::JsValue) -> Vec<Op> {
-        serde_wasm_bindgen::from_value(js).unwrap()
-    }
-
-    #[test]
+    #[wasm_bindgen_test]
     fn titles_converge_regardless_of_order() {
         let mut a = NoteDoc::new("A".into());
         let mut b = NoteDoc::new("B".into());

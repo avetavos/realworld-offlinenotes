@@ -107,11 +107,11 @@ function idbDelete(db, store, keys) {
 
 ### 2. `apps/web/src/background-sync.ts`
 
-เพิ่ม fallback สำหรับ browser ที่ไม่มี Background Sync โดยใช้ `pushOutbox` จาก Module 10 ซ้ำ — delivery logic ตัวเดียวกันเป๊ะ แค่ trigger จาก page แทนที่จะจาก worker
+เพิ่ม fallback สำหรับ browser ที่ไม่มี Background Sync โดยใช้ `push` จาก Module 10 ซ้ำ — delivery logic ตัวเดียวกันเป๊ะ แค่ trigger จาก page แทนที่จะจาก worker
 
 ```ts
 // apps/web/src/background-sync.ts (additions)
-import { pushOutbox } from './sync';           // Module 10
+import { push } from './sync';           // Module 10
 // hasBackgroundSync() is defined earlier in this same file (previous lesson).
 
 // Where native Background Sync is missing, retry from the page on the two
@@ -120,7 +120,7 @@ export function installOnlineFallback(): void {
   if (hasBackgroundSync()) return;             // the SW sync event covers us
 
   const retry = () => {
-    if (navigator.onLine) void pushOutbox();
+    if (navigator.onLine) void push();
   };
 
   window.addEventListener('online', retry);
@@ -154,7 +154,7 @@ await (await indexedDB.open('offlinenotes', 1)).result
 // or inspect Application → IndexedDB → offlinenotes → outbox  (0 records)
 ```
 
-จากนั้นทดสอบ path fallback: ใน Firefox หรือ Safari (ไม่มี Background Sync) แก้ตอน offline, สลับ network ของ OS กลับมา, แล้วดู `installOnlineFallback` fire `pushOutbox` บน `online` event — `curl` เดียวกันแสดง `head` advance สุดท้าย:
+จากนั้นทดสอบ path fallback: ใน Firefox หรือ Safari (ไม่มี Background Sync) แก้ตอน offline, สลับ network ของ OS กลับมา, แล้วดู `installOnlineFallback` fire `push` บน `online` event — `curl` เดียวกันแสดง `head` advance สุดท้าย:
 
 ```bash
 pnpm --filter web build

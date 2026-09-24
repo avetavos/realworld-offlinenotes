@@ -99,7 +99,7 @@ pub fn count_ops(val: JsValue) -> Result<usize, JsValue> {
 object ที่คุณได้จาก `demo_ops()` เป็น JS ธรรมดาที่คุณ log, store หรือส่งได้ ยื่นกลับให้ `count_ops` ตรง ๆ แล้ว deserialize ได้สะอาด เพราะทั้งสองทิศอ่านนิยาม serde เดียวกัน
 
 ```ts
-import init, { demo_ops, count_ops } from '../../crates/crdt/pkg/crdt.js';
+import init, { demo_ops, count_ops } from '../../../crates/crdt/pkg/crdt.js';
 
 export async function boundarySmoke(): Promise<void> {
   await init();

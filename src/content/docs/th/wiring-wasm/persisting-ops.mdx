@@ -1,18 +1,18 @@
 ---
 title: Persisting ops
-description: "Save CRDT snapshot ลง docs store, queue แต่ละ op ไว้ใน outbox, และกู้ note ด้วย NoteDoc.fromSnapshot เพื่อให้ reload ไม่สูญเสียอะไร"
+description: "Save CRDT snapshot ลง docs store, queue แต่ละ op ไว้ใน outbox, และกู้ note ด้วย NoteDoc.from_snapshot เพื่อให้ reload ไม่สูญเสียอะไร"
 sidebar:
   order: 2
 ---
 
-ตอนนี้ op ไหลออกจากทุก edit แล้ว แต่หายไปตอน reload บทนี้ทำให้ document คงทน: **snapshot** ของ CRDT ทั้งก้อนไปที่ `docs` store, แต่ละ **op** ถูก queue ไว้ใน `outbox`, และการเปิด note ซ้ำจะสร้างขึ้นใหม่ด้วย `NoteDoc.fromSnapshot`
+ตอนนี้ op ไหลออกจากทุก edit แล้ว แต่หายไปตอน reload บทนี้ทำให้ document คงทน: **snapshot** ของ CRDT ทั้งก้อนไปที่ `docs` store, แต่ละ **op** ถูก queue ไว้ใน `outbox`, และการเปิด note ซ้ำจะสร้างขึ้นใหม่ด้วย `NoteDoc.from_snapshot`
 
 ## สิ่งที่จะสร้าง
 
 write path สองเส้นและ read path หนึ่งเส้น ทั้งหมดผ่าน typed `db.ts` wrapper จาก IndexedDB module:
 
 - **ทุกครั้งที่ edit** — persist snapshot ใหม่ไปที่ `docs` (state ที่เป็นทางการ) และ append op ที่ return มาไปที่ `outbox` (queue ที่ยังไม่ sync) แล้ว refresh projection ของ `notes` list
-- **ตอนเปิด** — อ่าน record ของ note จาก `docs` แล้วสร้าง document ที่มีชีวิตขึ้นใหม่ด้วย `NoteDoc.fromSnapshot(actorId, snapshot)`
+- **ตอนเปิด** — อ่าน record ของ note จาก `docs` แล้วสร้าง document ที่มีชีวิตขึ้นใหม่ด้วย `NoteDoc.from_snapshot(actorId, snapshot)`
 
 editor ยังคง render จาก `title()` และ `text()` เหมือนเดิมเป๊ะ; ไม่รู้เลยว่ามีการ persist เกิดขึ้น
 
@@ -22,7 +22,7 @@ flowchart TD
     Edit --> Ops["each op"]
     Snap -->|"putDoc"| Docs[("docs store<br/>{id, actorId, snapshot}")]
     Ops -->|"enqueueOp"| Outbox[("outbox store<br/>{seq, noteId, op}")]
-    Docs -->|"getDoc + fromSnapshot"| Reload["reopen note"]
+    Docs -->|"getDoc + from_snapshot"| Reload["reopen note"]
 ```
 
 ## ทำไม
@@ -31,13 +31,13 @@ flowchart TD
 
 เราเก็บแค่ op log แล้ว replay ได้ไหม? ได้ และดีไซน์แบบ pure event-sourced ก็ทำแบบนั้น แต่การ replay ทุก op ตั้งแต่ตอนสร้างเพื่อเปิด note จะช้าลงเรื่อย ๆ ทุกครั้งที่ edit และหัวใจของ local-first คือการเปิด note ต้องทันทีและ offline ได้ snapshot คือ cache ของ state ที่พับเก็บไว้แล้ว; outbox คือส่วนหางที่เรายังติดค้าง network อยู่ การเก็บทั้งสองคือทางสายกลางที่ practical: อ่านเร็ว *และ* มี sync record ที่แม่นยำ
 
-`fromSnapshot` คือสิ่งที่ทำให้ snapshot เชื่อถือได้ เพราะสร้าง `NoteDoc` ขึ้นใหม่ด้วย actor id *ตัวเดียวกัน* และ counter ภายในเดิม edit ที่ทำหลัง reload จึงผลิต op ที่เข้าล็อกถูกที่ใน causal history เดียวกัน — note ที่กู้กลับมาแยกไม่ออกจาก note ที่ไม่เคยถูกปิดเลย
+`from_snapshot` คือสิ่งที่ทำให้ snapshot เชื่อถือได้ เพราะสร้าง `NoteDoc` ขึ้นใหม่ด้วย actor id *ตัวเดียวกัน* และ counter ภายในเดิม edit ที่ทำหลัง reload จึงผลิต op ที่เข้าล็อกถูกที่ใน causal history เดียวกัน — note ที่กู้กลับมาแยกไม่ออกจาก note ที่ไม่เคยถูกปิดเลย
 
 ## ข้อดีข้อเสีย
 
 **persist snapshot ทุกครั้งที่ edit เทียบกับ persist แค่ op log**
 
-- **Pros:** การเปิด note คือ `getDoc` หนึ่งครั้งและ `fromSnapshot` หนึ่งครั้ง — เวลาคงที่ ไม่มี replay อยู่รอด reload และการ restart browser
+- **Pros:** การเปิด note คือ `getDoc` หนึ่งครั้งและ `from_snapshot` หนึ่งครั้ง — เวลาคงที่ ไม่มี replay อยู่รอด reload และการ restart browser
 - **Cons:** snapshot พก CRDT metadata มาด้วย (tombstone จาก text ที่ลบไปแล้วจะไม่หดลงถ้าไม่มี compaction — ข้อควรระวังที่ตรงไปตรงมาจาก CRDT module) ดังนั้น blob ที่เก็บไว้จึงโตขึ้นตามประวัติการ edit
 
 **outbox queue แยกต่างหาก เทียบกับ derive op ที่ยังไม่ sync ออกจาก snapshot ตอน push**
@@ -90,7 +90,61 @@ export async function enqueueOp(noteId: string, op: Op) {
 }
 ```
 
-### 2. `apps/web/src/store.ts` — persist on change
+### 2. `crates/crdt/src/lib.rs` — `snapshot` และ `from_snapshot`
+
+บท CRDT ไม่เคยให้ `NoteDoc` มีวิธี serialize หรือสร้างตัวเองขึ้นใหม่เลย — เพิ่มตอนนี้ เพราะนี่คือบทแรกที่ต้องใช้มัน `docs` เก็บสิ่งที่ `snapshot()` คืนมาแล้วส่งกลับให้ `from_snapshot` โดยไม่แก้อะไร ดังนั้น wire shape แค่ต้องสมเหตุสมผลสำหรับ Rust เท่านั้น การสร้าง Lamport counter ขึ้นใหม่เป็น timestamp สูงสุดที่เจอทั้งใน title หรือ body ทำให้ local edit ตัวถัดไปหลัง reload ยังคงสูงกว่าทุกอย่างที่มีอยู่แล้วใน document
+
+```rust
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Snapshot {
+    title: Lww<String>,
+    body: Rga,
+}
+
+#[wasm_bindgen]
+impl NoteDoc {
+    /// Serialize the whole document — title register and body — for storage.
+    pub fn snapshot(&self) -> JsValue {
+        let snap = Snapshot { title: self.title.clone(), body: self.body.clone() };
+        serde_wasm_bindgen::to_value(&snap).unwrap()
+    }
+
+    /// Rebuild a document from a stored snapshot, with the Lamport clock
+    /// seeded past every timestamp it contains.
+    pub fn from_snapshot(actor_id: String, snapshot: JsValue) -> Result<NoteDoc, JsValue> {
+        let snap: Snapshot = serde_wasm_bindgen::from_value(snapshot)?;
+        let counter = snap.title.ts_counter().max(snap.body.max_counter());
+        Ok(NoteDoc { actor_id, counter, title: snap.title, body: snap.body })
+    }
+}
+```
+
+accessor เล็ก ๆ สองตัวป้อนเลขให้ `from_snapshot` — เพิ่มไว้ข้าง ๆ `Lww::merge` และ `Rga::tombstone` ตามลำดับ:
+
+```rust
+impl<T: Clone> Lww<T> {
+    fn ts_counter(&self) -> u32 {
+        self.ts.0
+    }
+}
+```
+
+```rust
+impl Rga {
+    fn max_counter(&self) -> u32 {
+        self.elems.iter().map(|e| e.id.0).max().unwrap_or(0)
+    }
+}
+```
+
+Build WASM package ใหม่ให้ `snapshot`/`from_snapshot` ไปอยู่ใน `pkg/`:
+
+```bash
+cd crates/crdt
+wasm-pack build --target web
+```
+
+### 3. `apps/web/src/store.ts` — persist on change
 
 ขยาย store ให้ mutator save ก่อนที่จะ return helper ตัวเดียวพับ write สามอย่างเข้าด้วยกัน: snapshot ไป `docs`, op ไป `outbox`, projection ไป `notes` การห่อ edit และ persist ไว้ใน method เดียวช่วยให้ `docs` และ `outbox` เดินตรง step กัน
 
@@ -106,9 +160,9 @@ async function persist(id: string, actorId: string, doc: NoteDoc, ops: Op[]) {
 }
 ```
 
-### 3. `apps/web/src/store.ts` — open from snapshot
+### 4. `apps/web/src/store.ts` — open from snapshot
 
-`openNote` อ่าน `docs`; ถ้ามี record อยู่ ก็สร้างใหม่ด้วย `fromSnapshot` ไม่งั้นเริ่ม `NoteDoc` ใหม่สด ๆ ตอนนี้ edit method จะ `await persist(...)` ก่อน fire `onChange`
+`openNote` อ่าน `docs`; ถ้ามี record อยู่ ก็สร้างใหม่ด้วย `from_snapshot` ไม่งั้นเริ่ม `NoteDoc` ใหม่สด ๆ ตอนนี้ edit method จะ `await persist(...)` ก่อน fire `onChange`
 
 ```ts
 export async function openNote(id: string, onChange: () => void): Promise<OpenNote> {
@@ -117,7 +171,7 @@ export async function openNote(id: string, onChange: () => void): Promise<OpenNo
 
   const stored = await getDoc(id);
   const doc = stored
-    ? NoteDoc.fromSnapshot(stored.actorId, stored.snapshot)
+    ? NoteDoc.from_snapshot(stored.actorId, stored.snapshot)
     : new NoteDoc(actorId);
   const docActor = stored?.actorId ?? actorId;
 
@@ -129,7 +183,7 @@ export async function openNote(id: string, onChange: () => void): Promise<OpenNo
 
   return {
     id,
-    setTitle: (t) => toOps(doc.set_title(t)),        // then: applied(...)
+    setTitle: (t) => applied(toOps(doc.set_title(t))) as unknown as Op[],
     insertText: (i, s) => applied(toOps(doc.insert_text(i, s))) as unknown as Op[],
     deleteText: (i, n) => applied(toOps(doc.delete_text(i, n))) as unknown as Op[],
     title: () => doc.title(),
@@ -172,10 +226,10 @@ pnpm --filter web build
 **ตรวจสอบความเข้าใจ:**
 
 1. ทำไมถึงเก็บทั้ง snapshot ใน `docs` และ op ใน `outbox` แทนที่จะเก็บแค่อย่างใดอย่างหนึ่ง?
-2. `NoteDoc.fromSnapshot(actorId, snapshot)` สร้างอะไรขึ้นใหม่ที่ `new NoteDoc(actorId)` สด ๆ จะไม่มี?
+2. `NoteDoc.from_snapshot(actorId, snapshot)` สร้างอะไรขึ้นใหม่ที่ `new NoteDoc(actorId)` สด ๆ จะไม่มี?
 3. ทำไม snapshot write และ outbox append ควรเกิดพร้อมกันสำหรับ edit ครั้งเดียว?
 4. อะไรใน snapshot ที่เก็บไว้โตแบบไม่มีขอบเขต และเทคนิคใดในภายหลัง (ที่ตั้งชื่อไว้ใน CRDT module) จะจำกัดขอบเขตได้?
 
 ## สรุป
 
-ตอนนี้ note คงทนแล้ว: ทุก edit save snapshot ไป `docs` queue op ไว้ใน `outbox` และ refresh projection ของ `notes`; การเปิดซ้ำสร้าง document เดิมขึ้นใหม่เป๊ะ ๆ ด้วย `fromSnapshot` outbox คือ record ที่แม่นยำของสิ่งที่เรายังติดค้าง network — แต่ยังไม่มีอะไรอ่าน และ app ยังต้องมี server ที่ live ถึงจะทำงานได้ ต่อไป [Service Worker (Offline) →](/offlinenotes/th/service-worker/) ทำให้ app shell เองโหลดได้โดยไม่มี network เพื่อให้ OfflineNotes รัน offline ได้จริง
+ตอนนี้ note คงทนแล้ว: ทุก edit save snapshot ไป `docs` queue op ไว้ใน `outbox` และ refresh projection ของ `notes`; การเปิดซ้ำสร้าง document เดิมขึ้นใหม่เป๊ะ ๆ ด้วย `from_snapshot` outbox คือ record ที่แม่นยำของสิ่งที่เรายังติดค้าง network — แต่ยังไม่มีอะไรอ่าน และ app ยังต้องมี server ที่ live ถึงจะทำงานได้ ต่อไป [Service Worker (Offline) →](/offlinenotes/th/service-worker/) ทำให้ app shell เองโหลดได้โดยไม่มี network เพื่อให้ OfflineNotes รัน offline ได้จริง

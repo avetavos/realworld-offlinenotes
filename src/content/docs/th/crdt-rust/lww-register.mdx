@@ -146,18 +146,23 @@ cd crates/crdt
 wasm-pack build --target web
 ```
 
-test จริงคือ convergence: สอง doc ตั้ง title พร้อมกัน, แลก op กัน และต้องจบเหมือนกัน **ไม่ว่าใครคิดว่าตัวเองเขียนทีหลัง** เพราะ tie-break ตกไปที่ actor id, actor id ที่สูงกว่า ("B") ชนะทุกการเสมอ counter — และทั้งสอง replica เห็นด้วย เพิ่มโค้ดนี้แล้วรัน `cargo test`:
+test นี้ข้าม boundary JS↔WASM — `set_title` คืน `JsValue` — จึงต้องรันในเอนจิน WASM จริง `cargo test` เฉยๆ รันแบบ native แล้วจะ panic ทันทีที่แตะมันด้วย "cannot call wasm-bindgen imported functions on non-wasm targets" เพิ่ม `wasm-bindgen-test` ใน `[dev-dependencies]` เพื่อให้ `wasm-pack test --node` รันมันใน Node แทนได้:
+
+```toml
+[dev-dependencies]
+serde_json = "1"
+wasm-bindgen-test = "0.3"
+```
+
+test จริงคือ convergence: สอง doc ตั้ง title พร้อมกัน, แลก op กัน และต้องจบเหมือนกัน **ไม่ว่าใครคิดว่าตัวเองเขียนทีหลัง** เพราะ tie-break ตกไปที่ actor id, actor id ที่สูงกว่า ("B") ชนะทุกการเสมอ counter — และทั้งสอง replica เห็นด้วย เพิ่ม test นี้แล้วรันด้วย `wasm-pack test --node`:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-    fn ops_from(js: wasm_bindgen::JsValue) -> Vec<Op> {
-        serde_wasm_bindgen::from_value(js).unwrap()
-    }
-
-    #[test]
+    #[wasm_bindgen_test]
     fn titles_converge_regardless_of_order() {
         let mut a = NoteDoc::new("A".into());
         let mut b = NoteDoc::new("B".into());

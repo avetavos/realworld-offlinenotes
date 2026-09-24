@@ -45,7 +45,8 @@ sidebar:
 เพิ่มพวกนี้ต่อยอดจาก `getDb()` ของบทก่อน ทุก function `await` connection ที่ใช้ร่วมกัน จึงขี่ upgrade path เดียวกันหมด
 
 ```ts
-import type { Op, SnapshotData } from './db';
+// Op and SnapshotData are already declared above in this same db.ts, from
+// the previous lesson — no import needed, they're in scope.
 
 // --- notes: the list projection ---------------------------------------
 

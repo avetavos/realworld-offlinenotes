@@ -99,7 +99,7 @@ pub fn count_ops(val: JsValue) -> Result<usize, JsValue> {
 The object you get from `demo_ops()` is ordinary JS you can log, store, or send. Hand it straight back to `count_ops` and it deserializes cleanly, because both directions read the same serde definition.
 
 ```ts
-import init, { demo_ops, count_ops } from '../../crates/crdt/pkg/crdt.js';
+import init, { demo_ops, count_ops } from '../../../crates/crdt/pkg/crdt.js';
 
 export async function boundarySmoke(): Promise<void> {
   await init();

@@ -53,9 +53,35 @@ pub struct Rga {
 }
 ```
 
-### 2. `integrate` — place one element deterministically
+### 2. Give `NoteDoc` a body
 
-นี่คือหัวใจของ RGA หา position ของ anchor แล้วเดินผ่าน sibling ที่แชร์ anchor นั้นซึ่งมี id **มากกว่า** ตัวใหม่ (กฎ id-จากมากไปน้อย) แล้ว insert การ integrate id ที่เรามีอยู่แล้วเป็น no-op — นั่นคือ **idempotence** เพราะการวางขึ้นกับแค่ anchor และการเทียบ id ไม่เคยขึ้นกับลำดับที่มาถึง สอง replica ที่ integrate element ชุดเดียวกันจึงลงที่ sequence เดียวกัน — นั่นคือ **commutativity และ associativity**
+`NoteDoc` มีแค่ `title` ก่อนบทนี้ ต้องเพิ่ม field `body: Rga` ที่ทั้งบทนี้อ้างอิงถึง และ initialize มันใน constructor ต่อจาก field ที่มาจากบท [LWW register](/offlinenotes/th/crdt-rust/lww-register/)
+
+```rust
+#[wasm_bindgen]
+pub struct NoteDoc {
+    actor_id: String,
+    counter: u32,
+    title: Lww<String>,
+    body: Rga,
+}
+```
+
+```rust
+// inside the existing `NoteDoc::new` constructor
+NoteDoc {
+    counter: 0,
+    title: Lww::new(String::new(), ts),
+    body: Rga::default(),
+    actor_id,
+}
+```
+
+### 3. `integrate` — place one element deterministically
+
+นี่คือหัวใจของ RGA หา position ของ anchor แล้วเดินผ่าน sibling ที่แชร์ anchor นั้นซึ่งมี id **มากกว่า** ตัวใหม่ (กฎ id-จากมากไปน้อย) แล้ว insert การ integrate id ที่เรามีอยู่แล้วเป็น no-op — นั่นคือ **idempotence**
+
+การข้าม sibling ที่ id สูงกว่าเฉย ๆ ยังไม่พอ — ต้องข้าม **ทั้ง subtree** ของมันด้วย คือทุก element ที่ chain ต่อจากมันไปแล้ว ไม่ใช่แค่ตัวอักษรเดียวนั้น ถ้าหยุดแค่ที่ตัว sibling เอง run หลายตัวอักษรที่มาทีหลังจะ interleave ทีละตัวกับ run ก่อนหน้าแทนที่จะอยู่รวมกันเป็นก้อนเดียว แล้วสอง replica ที่ interleave ในลำดับต่างกันก็จะได้ผลไม่ตรงกัน — นี่คือ "interleaving anomaly" ที่ RGA แบบไร้เดียงสาขึ้นชื่อ `descends_from` ตอบคำถามนี้ด้วยการเดินตาม pointer `after` ย้อนขึ้นจาก candidate จนกว่าจะถึง anchor ของเรา (แปลว่ามันซ้อนอยู่ใต้ sibling ที่กำลังข้าม — เดินต่อ) หรือหลุดออกไปนอกจุดเริ่มต้นเอกสาร (ไม่เกี่ยวข้อง — หยุด) เมื่อมีสิ่งนี้แล้ว การวางขึ้นกับแค่ anchor และการเทียบ id ไม่เคยขึ้นกับลำดับที่มาถึง สอง replica ที่ integrate element ชุดเดียวกันจึงลงที่ sequence เดียวกัน — นั่นคือ **commutativity และ associativity**
 
 ```rust
 impl Rga {
@@ -75,17 +101,44 @@ impl Rga {
             },
         };
 
-        // Skip siblings under the same anchor with a greater id (newer-first).
+        // Skip past the *whole subtree* of any sibling under the same anchor
+        // with a greater id (newer-first) — not just that one sibling, but
+        // everything already chained after it. Stopping at the first direct
+        // sibling would let a later run interleave with an earlier one
+        // instead of staying contiguous, breaking convergence.
         let mut i = start;
         while i < self.elems.len() {
             let x = &self.elems[i];
-            if x.after == e.after && x.id > e.id {
-                i += 1;
-            } else {
+            if x.after == e.after {
+                if x.id > e.id {
+                    i += 1;
+                    continue;
+                }
                 break;
             }
+            if self.descends_from(&x.after, &e.after) {
+                i += 1;
+                continue;
+            }
+            break;
         }
         self.elems.insert(i, e);
+    }
+
+    /// Walk `after` pointers up from `id` until reaching `anchor` (true) or
+    /// running off the start of the document (false) — is `id` nested under
+    /// `anchor`'s subtree?
+    fn descends_from(&self, id: &Option<Id>, anchor: &Option<Id>) -> bool {
+        let mut cur = id.clone();
+        loop {
+            if &cur == anchor {
+                return true;
+            }
+            match cur {
+                None => return false,
+                Some(c) => cur = self.elems.iter().find(|x| x.id == c).and_then(|x| x.after.clone()),
+            }
+        }
     }
 
     fn text(&self) -> String {
@@ -112,7 +165,7 @@ impl Rga {
 }
 ```
 
-### 3. `insert_text`, `delete_text`, `text` on `NoteDoc`
+### 4. `insert_text`, `delete_text`, `text` on `NoteDoc`
 
 `insert_text` แปลง `index` ที่มองเห็นเป็น anchor id แล้วสร้าง id ใหม่ต่อตัวอักษร โดยผูกแต่ละตัวอักษรใหม่เป็น anchor ของตัวถัดไป ดังนั้น paste หลายตัวอักษรจึงอยู่ในลำดับ แล้วคืน batch ของ `Insert` op `delete_text` resolve range ที่มองเห็นเป็น id แล้ว tombstone ทิ้ง คืน `Delete` op ทั้งคู่คืน shape `Op[]` เป๊ะที่แอปเก็บและ sync
 
@@ -154,7 +207,7 @@ impl NoteDoc {
 }
 ```
 
-### 4. Extend `merge` with the `Insert`/`Delete` branches
+### 5. Extend `merge` with the `Insert`/`Delete` branches
 
 `merge` จากบทที่แล้วได้เพิ่มสอง arm `Insert` ที่เข้ามาเลื่อน Lamport clock แล้ว integrate element; `Delete` tombstone ด้วย id handler ทั้งคู่ idempotent และผลลัพธ์ไม่ขึ้นกับลำดับ — ดังนั้น batch จะมาถึงแบบสลับ, ซ้ำ หรือแทรกกับ local edit ก็ได้ และ body ยัง converge
 
@@ -190,14 +243,15 @@ cd crates/crdt
 wasm-pack build --target web
 ```
 
-test สำคัญสุด: สอง replica insert เข้า body เดียวกัน (เริ่มว่าง) พร้อมกัน, แลก op และต้องแสดง text เหมือนกันบนทั้งคู่ — และการ re-merge op เดิมต้องไม่เปลี่ยนอะไร (idempotence) เพิ่มโค้ดนี้แล้วรัน test:
+test สำคัญสุด: สอง replica insert เข้า body เดียวกัน (เริ่มว่าง) พร้อมกัน, แลก op และต้องแสดง text เหมือนกันบนทั้งคู่ — และการ re-merge op เดิมต้องไม่เปลี่ยนอะไร (idempotence) เป็นคนละ module ชื่อ `rga_tests` เพื่อไม่ให้ชนกับ module `tests` ที่บท [LWW register](/offlinenotes/th/crdt-rust/lww-register/) เพิ่มเข้า `lib.rs` ไปแล้ว เพิ่มโค้ดนี้แล้วรัน test:
 
 ```rust
 #[cfg(test)]
-mod tests {
+mod rga_tests {
     use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-    #[test]
+    #[wasm_bindgen_test]
     fn bodies_converge_and_merge_is_idempotent() {
         let mut a = NoteDoc::new("A".into());
         let mut b = NoteDoc::new("B".into());
@@ -231,7 +285,7 @@ wasm-pack test --node
 
 ```
 running 1 test
-test tests::bodies_converge_and_merge_is_idempotent ... ok
+test rga_tests::bodies_converge_and_merge_is_idempotent ... ok
 
 test result: ok. 1 passed; 0 failed
 ```

@@ -105,7 +105,7 @@ wasm-pack build --target web
 เรียกทั้งสอง export จาก TypeScript default export คือ `init` — คุณต้อง `await` ครั้งหนึ่งก่อน call อื่นใด เพราะเป็นตัวที่ fetch และ instantiate binary `.wasm` path เอื้อมออกจาก `apps/web` เข้าไปใน `pkg/` ที่ build แล้ว
 
 ```ts
-import init, { version, Clock } from '../../crates/crdt/pkg/crdt.js';
+import init, { version, Clock } from '../../../crates/crdt/pkg/crdt.js';
 
 export async function smokeTest(): Promise<void> {
   await init(); // fetch + instantiate the .wasm — required before any call

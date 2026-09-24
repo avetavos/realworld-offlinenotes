@@ -69,14 +69,14 @@ store เรียก `enqueueOp` หลังทุก local edit อยู่�
 
 ```ts
 // apps/web/src/store.ts (inside the edit path, after enqueueOp)
-import { pushOutbox } from './sync';           // Module 10
+import { push } from './sync';           // Module 10
 import { requestSync } from './background-sync';
 
 async function afterLocalEdit(noteId: string, op: unknown): Promise<void> {
   await enqueueOp(noteId, op);                  // durable first — Module 3
 
   if (navigator.onLine) {
-    await pushOutbox();                          // deliver immediately
+    await push();                          // deliver immediately
   } else {
     await requestSync();                         // defer: retry when back online
   }

@@ -31,7 +31,7 @@ Getting the component boundaries and their event contract right *before* data fl
 
 ## Set it up
 
-### 1. `apps/web/src/scripts/note-list.ts`
+### 1. `apps/web/src/components/note-list.ts`
 
 The list panel skeleton. It renders a header with a **New** button and an empty `<ul>`. Clicking **New** dispatches a bubbling `note-new` event — the parent will handle creating a note later; the component just announces intent.
 
@@ -55,7 +55,7 @@ export class NoteList extends HTMLElement {
 customElements.define('note-list', NoteList);
 ```
 
-### 2. `apps/web/src/scripts/note-editor.ts`
+### 2. `apps/web/src/components/note-editor.ts`
 
 The editor skeleton: a title input and a body textarea. Both emit a bubbling `note-change` event on input. Nothing is saved yet — this is the surface the CRDT will later turn into ops.
 
@@ -82,7 +82,7 @@ export class NoteEditor extends HTMLElement {
 customElements.define('note-editor', NoteEditor);
 ```
 
-### 3. `apps/web/src/scripts/offline-notes-app.ts` — compose the panes
+### 3. `apps/web/src/components/offline-notes-app.ts` — compose the panes
 
 Update the root element to render the two components side by side. Importing their modules at the top guarantees `<note-list>` and `<note-editor>` are defined before the root renders them.
 

@@ -21,7 +21,7 @@ The cursor is what keeps pull cheap and correct. We store the largest `seq` we'v
 
 **Merge-then-persist-snapshot vs replaying the whole op log**
 
-- **Pros:** We keep one authoritative snapshot per note in `docs` and fold new ops into it incrementally. Reloads are `fromSnapshot`, not a full replay — fast and bounded by note size, not history length.
+- **Pros:** We keep one authoritative snapshot per note in `docs` and fold new ops into it incrementally. Reloads are `from_snapshot`, not a full replay — fast and bounded by note size, not history length.
 - **Cons:** The snapshot is derived state we must keep in step with the cursor. Persist the snapshot and advance `pulled:<noteId>` together, or a crash between them re-merges a few ops next time (harmless, thanks to idempotence — but worth understanding).
 
 **Re-render via an event vs the store calling the UI directly**
@@ -36,7 +36,7 @@ The cursor is what keeps pull cheap and correct. We store the largest `seq` we'v
 Add `pull` alongside `push`. `NoteDoc` and `init()` were already loaded when the app booted (see [Wiring the WASM Core →](/offlinenotes/en/wiring-wasm/)), so here we just construct from the stored snapshot and merge.
 
 ```ts
-import { NoteDoc } from '../../crates/crdt/pkg/crdt.js';
+import { NoteDoc } from '../../../crates/crdt/pkg/crdt.js';
 import { getDoc, putDoc, putNote, getMeta, setMeta } from './db';
 
 const SYNC_URL = import.meta.env.PUBLIC_SYNC_URL ?? 'http://localhost:8787';
@@ -56,7 +56,7 @@ export async function pull(noteId: string): Promise<void> {
 
   // Rebuild the note from its snapshot and fold in the remote ops.
   const record = await getDoc(noteId); // { id, actorId, snapshot }
-  const doc = NoteDoc.fromSnapshot(record.actorId, record.snapshot);
+  const doc = NoteDoc.from_snapshot(record.actorId, record.snapshot);
 
   doc.merge(ops.map((entry) => entry.op)); // the conflict-free step
 

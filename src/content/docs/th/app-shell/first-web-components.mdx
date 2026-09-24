@@ -31,7 +31,7 @@ custom elements สามตัวที่ประกอบเป็น notes 
 
 ## ติดตั้ง
 
-### 1. `apps/web/src/scripts/note-list.ts`
+### 1. `apps/web/src/components/note-list.ts`
 
 โครงแพเนล list render header ที่มีปุ่ม **New** และ `<ul>` เปล่า การคลิก **New** dispatch event `note-new` แบบ bubble — parent จะจัดการเรื่องสร้าง note ภายหลัง; component แค่ประกาศเจตนา
 
@@ -55,7 +55,7 @@ export class NoteList extends HTMLElement {
 customElements.define('note-list', NoteList);
 ```
 
-### 2. `apps/web/src/scripts/note-editor.ts`
+### 2. `apps/web/src/components/note-editor.ts`
 
 โครง editor: input ชื่อและ textarea body ทั้งคู่ emit event `note-change` แบบ bubble ตอน input ยังไม่มีอะไร save — นี่คือพื้นผิวที่ CRDT จะเปลี่ยนเป็น op ภายหลัง
 
@@ -82,7 +82,7 @@ export class NoteEditor extends HTMLElement {
 customElements.define('note-editor', NoteEditor);
 ```
 
-### 3. `apps/web/src/scripts/offline-notes-app.ts` — compose the panes
+### 3. `apps/web/src/components/offline-notes-app.ts` — compose the panes
 
 อัปเดต root element ให้ render สอง component เคียงข้างกัน การ import module ทั้งสองไว้ด้านบนรับประกันว่า `<note-list>` และ `<note-editor>` ถูกนิยามก่อนที่ root จะ render
 

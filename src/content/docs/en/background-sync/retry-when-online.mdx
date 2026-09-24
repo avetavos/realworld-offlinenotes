@@ -107,11 +107,11 @@ Deleting only the drained `seq`s matters: an edit made *during* the push stays q
 
 ### 2. `apps/web/src/background-sync.ts`
 
-Add the fallback for browsers without Background Sync. It reuses `pushOutbox` from Module 10 — the very same delivery logic, just triggered from the page instead of the worker.
+Add the fallback for browsers without Background Sync. It reuses `push` from Module 10 — the very same delivery logic, just triggered from the page instead of the worker.
 
 ```ts
 // apps/web/src/background-sync.ts (additions)
-import { pushOutbox } from './sync';           // Module 10
+import { push } from './sync';           // Module 10
 // hasBackgroundSync() is defined earlier in this same file (previous lesson).
 
 // Where native Background Sync is missing, retry from the page on the two
@@ -120,7 +120,7 @@ export function installOnlineFallback(): void {
   if (hasBackgroundSync()) return;             // the SW sync event covers us
 
   const retry = () => {
-    if (navigator.onLine) void pushOutbox();
+    if (navigator.onLine) void push();
   };
 
   window.addEventListener('online', retry);
@@ -154,7 +154,7 @@ await (await indexedDB.open('offlinenotes', 1)).result
 // or inspect Application → IndexedDB → offlinenotes → outbox  (0 records)
 ```
 
-Then test the fallback path: in Firefox or Safari (no Background Sync), edit offline, toggle the OS network back on, and watch `installOnlineFallback` fire `pushOutbox` on the `online` event — the same `curl` shows `head` advancing. Finally:
+Then test the fallback path: in Firefox or Safari (no Background Sync), edit offline, toggle the OS network back on, and watch `installOnlineFallback` fire `push` on the `online` event — the same `curl` shows `head` advancing. Finally:
 
 ```bash
 pnpm --filter web build

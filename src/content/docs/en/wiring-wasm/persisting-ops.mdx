@@ -1,18 +1,18 @@
 ---
 title: Persisting ops
-description: "Save the CRDT snapshot to the docs store, queue each op in the outbox, and restore a note with NoteDoc.fromSnapshot so a reload loses nothing."
+description: "Save the CRDT snapshot to the docs store, queue each op in the outbox, and restore a note with NoteDoc.from_snapshot so a reload loses nothing."
 sidebar:
   order: 2
 ---
 
-Ops now flow from every edit, but they vanish on reload. This lesson makes the document durable: the full CRDT **snapshot** goes to the `docs` store, each **op** is queued in the `outbox`, and reopening a note rebuilds it with `NoteDoc.fromSnapshot`.
+Ops now flow from every edit, but they vanish on reload. This lesson makes the document durable: the full CRDT **snapshot** goes to the `docs` store, each **op** is queued in the `outbox`, and reopening a note rebuilds it with `NoteDoc.from_snapshot`.
 
 ## What we're building
 
 Two write paths and one read path, all through the typed `db.ts` wrapper from the IndexedDB module:
 
 - **On every edit** — persist the new snapshot to `docs` (the authoritative state) and append the returned ops to `outbox` (the not-yet-synced queue), and refresh the `notes` list projection.
-- **On open** — read the note's record from `docs` and reconstruct the live document with `NoteDoc.fromSnapshot(actorId, snapshot)`.
+- **On open** — read the note's record from `docs` and reconstruct the live document with `NoteDoc.from_snapshot(actorId, snapshot)`.
 
 The editor keeps rendering from `title()` and `text()` exactly as before; it never knows persistence happened.
 
@@ -22,7 +22,7 @@ flowchart TD
     Edit --> Ops["each op"]
     Snap -->|"putDoc"| Docs[("docs store<br/>{id, actorId, snapshot}")]
     Ops -->|"enqueueOp"| Outbox[("outbox store<br/>{seq, noteId, op}")]
-    Docs -->|"getDoc + fromSnapshot"| Reload["reopen note"]
+    Docs -->|"getDoc + from_snapshot"| Reload["reopen note"]
 ```
 
 ## Why
@@ -31,13 +31,13 @@ We store **two representations on purpose**, because they answer two different q
 
 Could we keep only the op log and replay it? Yes, and a pure event-sourced design would. But replaying every op since creation to open a note gets slower with every edit, and the whole point of local-first is that opening a note is instant and offline. The snapshot is a cache of the folded-up state; the outbox is the tail we still owe the network. Keeping both is the pragmatic middle: fast reads *and* a precise sync record.
 
-`fromSnapshot` is what makes the snapshot trustworthy. Because it reconstructs a `NoteDoc` with the *same* actor id and internal counters, edits made after a reload produce ops that slot correctly into the same causal history — a restored note is indistinguishable from one that was never closed.
+`from_snapshot` is what makes the snapshot trustworthy. Because it reconstructs a `NoteDoc` with the *same* actor id and internal counters, edits made after a reload produce ops that slot correctly into the same causal history — a restored note is indistinguishable from one that was never closed.
 
 ## Pros & cons
 
 **Persisting a snapshot on every edit, vs. persisting only the op log.**
 
-- **Pros:** Opening a note is one `getDoc` and one `fromSnapshot` — constant time, no replay. Survives reload and browser restart.
+- **Pros:** Opening a note is one `getDoc` and one `from_snapshot` — constant time, no replay. Survives reload and browser restart.
 - **Cons:** The snapshot carries CRDT metadata (tombstones from deleted text never shrink without compaction — the honest caveat from the CRDT module), so the stored blob grows with edit history.
 
 **A separate outbox queue, vs. deriving un-synced ops from the snapshot at push time.**
@@ -90,7 +90,61 @@ export async function enqueueOp(noteId: string, op: Op) {
 }
 ```
 
-### 2. `apps/web/src/store.ts` — persist on change
+### 2. `crates/crdt/src/lib.rs` — `snapshot` and `from_snapshot`
+
+The CRDT module never gave `NoteDoc` a way to serialize or rebuild itself — add it now, since this is the first lesson that needs it. `docs` stores whatever `snapshot()` returns and hands it back to `from_snapshot` unchanged, so the wire shape only has to make sense to Rust. Reconstructing the Lamport counter as the max timestamp seen in either the title or the body means the very next local edit after a reload still outranks everything already in the document.
+
+```rust
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Snapshot {
+    title: Lww<String>,
+    body: Rga,
+}
+
+#[wasm_bindgen]
+impl NoteDoc {
+    /// Serialize the whole document — title register and body — for storage.
+    pub fn snapshot(&self) -> JsValue {
+        let snap = Snapshot { title: self.title.clone(), body: self.body.clone() };
+        serde_wasm_bindgen::to_value(&snap).unwrap()
+    }
+
+    /// Rebuild a document from a stored snapshot, with the Lamport clock
+    /// seeded past every timestamp it contains.
+    pub fn from_snapshot(actor_id: String, snapshot: JsValue) -> Result<NoteDoc, JsValue> {
+        let snap: Snapshot = serde_wasm_bindgen::from_value(snapshot)?;
+        let counter = snap.title.ts_counter().max(snap.body.max_counter());
+        Ok(NoteDoc { actor_id, counter, title: snap.title, body: snap.body })
+    }
+}
+```
+
+Two tiny accessors feed `from_snapshot`'s counter math — add them next to `Lww::merge` and `Rga::tombstone` respectively:
+
+```rust
+impl<T: Clone> Lww<T> {
+    fn ts_counter(&self) -> u32 {
+        self.ts.0
+    }
+}
+```
+
+```rust
+impl Rga {
+    fn max_counter(&self) -> u32 {
+        self.elems.iter().map(|e| e.id.0).max().unwrap_or(0)
+    }
+}
+```
+
+Rebuild the WASM package so `snapshot`/`from_snapshot` land in `pkg/`:
+
+```bash
+cd crates/crdt
+wasm-pack build --target web
+```
+
+### 3. `apps/web/src/store.ts` — persist on change
 
 Extend the store so the mutators save before they return. A single helper folds the three writes together: snapshot to `docs`, ops to `outbox`, projection to `notes`. Wrapping edit and persist in one method keeps `docs` and `outbox` in step.
 
@@ -106,9 +160,9 @@ async function persist(id: string, actorId: string, doc: NoteDoc, ops: Op[]) {
 }
 ```
 
-### 3. `apps/web/src/store.ts` — open from snapshot
+### 4. `apps/web/src/store.ts` — open from snapshot
 
-`openNote` reads `docs`; if a record exists it rebuilds with `fromSnapshot`, otherwise it starts a fresh `NoteDoc`. The edit methods now `await persist(...)` before firing `onChange`.
+`openNote` reads `docs`; if a record exists it rebuilds with `from_snapshot`, otherwise it starts a fresh `NoteDoc`. The edit methods now `await persist(...)` before firing `onChange`.
 
 ```ts
 export async function openNote(id: string, onChange: () => void): Promise<OpenNote> {
@@ -117,7 +171,7 @@ export async function openNote(id: string, onChange: () => void): Promise<OpenNo
 
   const stored = await getDoc(id);
   const doc = stored
-    ? NoteDoc.fromSnapshot(stored.actorId, stored.snapshot)
+    ? NoteDoc.from_snapshot(stored.actorId, stored.snapshot)
     : new NoteDoc(actorId);
   const docActor = stored?.actorId ?? actorId;
 
@@ -129,7 +183,7 @@ export async function openNote(id: string, onChange: () => void): Promise<OpenNo
 
   return {
     id,
-    setTitle: (t) => toOps(doc.set_title(t)),        // then: applied(...)
+    setTitle: (t) => applied(toOps(doc.set_title(t))) as unknown as Op[],
     insertText: (i, s) => applied(toOps(doc.insert_text(i, s))) as unknown as Op[],
     deleteText: (i, n) => applied(toOps(doc.delete_text(i, n))) as unknown as Op[],
     title: () => doc.title(),
@@ -172,10 +226,10 @@ pnpm --filter web build
 **Check your understanding:**
 
 1. Why store both a snapshot in `docs` and the ops in `outbox`, instead of just one of them?
-2. What does `NoteDoc.fromSnapshot(actorId, snapshot)` reconstruct that a fresh `new NoteDoc(actorId)` would not have?
+2. What does `NoteDoc.from_snapshot(actorId, snapshot)` reconstruct that a fresh `new NoteDoc(actorId)` would not have?
 3. Why should the snapshot write and the outbox appends happen together for a single edit?
 4. What grows without bound in the stored snapshot, and which later technique (named in the CRDT module) would bound it?
 
 ## Recap
 
-A note is now durable: every edit saves its snapshot to `docs`, queues its ops in `outbox`, and refreshes the `notes` projection; reopening rebuilds the exact document with `fromSnapshot`. The outbox is a precise record of what we still owe the network — but nothing reads it yet, and the app still needs a live server to work. Next, [Service Worker (Offline) →](/offlinenotes/en/service-worker/) makes the app shell itself load with no network, so OfflineNotes truly runs offline.
+A note is now durable: every edit saves its snapshot to `docs`, queues its ops in `outbox`, and refreshes the `notes` projection; reopening rebuilds the exact document with `from_snapshot`. The outbox is a precise record of what we still owe the network — but nothing reads it yet, and the app still needs a live server to work. Next, [Service Worker (Offline) →](/offlinenotes/en/service-worker/) makes the app shell itself load with no network, so OfflineNotes truly runs offline.

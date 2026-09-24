@@ -80,7 +80,7 @@ const { title } = Astro.props;
 
 `is:global` บน `<style>` บอก Astro ไม่ให้ scope กฎเหล่านั้น — custom elements ของเรา render ใน light DOM จึงต้องการให้ style เข้าถึงได้
 
-### 2. `apps/web/src/scripts/offline-notes-app.ts`
+### 2. `apps/web/src/components/offline-notes-app.ts`
 
 root custom element `connectedCallback` รันเมื่อ browser แทรก element เข้ามา แล้วเรา render chrome ของ shell ลงไปข้างใน ตอนนี้ตั้งใจให้บางไว้ — header กับ body เปล่า ๆ ที่บทถัดไปจะเติม
 
@@ -112,7 +112,7 @@ import AppShell from '../layouts/AppShell.astro';
 </AppShell>
 
 <script>
-  import '../scripts/offline-notes-app.ts';
+  import '../components/offline-notes-app.ts';
 </script>
 ```
 

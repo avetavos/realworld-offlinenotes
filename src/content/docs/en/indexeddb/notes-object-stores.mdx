@@ -45,7 +45,8 @@ Pre-CRDT (this module and the [next](/offlinenotes/en/notes-ui/)), the UI writes
 Add these on top of the `getDb()` from the previous lesson. Every function `await`s the shared connection, so they all ride the one upgrade path.
 
 ```ts
-import type { Op, SnapshotData } from './db';
+// Op and SnapshotData are already declared above in this same db.ts, from
+// the previous lesson — no import needed, they're in scope.
 
 // --- notes: the list projection ---------------------------------------
 

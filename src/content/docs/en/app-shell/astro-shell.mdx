@@ -80,7 +80,7 @@ const { title } = Astro.props;
 
 `is:global` on the `<style>` tells Astro not to scope those rules — our custom elements render in the light DOM, so they need the styles to reach them.
 
-### 2. `apps/web/src/scripts/offline-notes-app.ts`
+### 2. `apps/web/src/components/offline-notes-app.ts`
 
 The root custom element. `connectedCallback` runs when the browser inserts the element, and we render the shell's chrome into it. It's intentionally thin now — a header and an empty body the next lesson fills.
 
@@ -112,7 +112,7 @@ import AppShell from '../layouts/AppShell.astro';
 </AppShell>
 
 <script>
-  import '../scripts/offline-notes-app.ts';
+  import '../components/offline-notes-app.ts';
 </script>
 ```
 
